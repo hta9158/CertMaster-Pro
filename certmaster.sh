@@ -1042,6 +1042,9 @@ main_menu() {
         echo
         read -r -p "Select option [0-9]: " OPTION
 
+        # Ignore empty input so an extra ENTER never triggers an error/reload cycle.
+        [[ -z "$OPTION" ]] && continue
+
         case $OPTION in
             1) install_certificate ;;
             2) wildcard_ssl ;;
