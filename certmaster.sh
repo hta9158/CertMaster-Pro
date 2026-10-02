@@ -914,20 +914,108 @@ health_monitor() {
 auto_repair() {
     ui_header
     echo -e "${NEON_PINK}--- SYSTEM AUTO REPAIR ---${RESET}"
+    echo
+    echo -e "  ${GRAY}CertMaster will check and repair common SSL/server issues.${RESET}"
+    echo
     read -r -p "Start system repair [y/N]: " confirm
     [[ "$confirm" =~ ^[Yy]$ ]] || return
 
+    local repair_failed=0
+    local apt_status=0
+    local cron_status=0
+    local web_status=0
+    local certbot_status=0
+
     echo
-    progress_bar 25 "Repairing System Packages..."
-    apt --fix-broken install -y >/dev/null 2>&1
-    
+
+    # 1. Repair broken APT packages
+    echo -e "${WHITE}${BOLD}[1/5] Package system${RESET}"
+    if apt-get update -qq >/dev/null 2>&1 && apt-get --fix-broken install -y >/dev/null 2>&1; then
+        success "APT packages: OK / repaired"
+    else
+        error "APT packages: Repair failed"
+        repair_failed=1
+    fi
+
+    # 2. Check/install Certbot
+    echo
+    echo -e "${WHITE}${BOLD}[2/5] Certbot${RESET}"
+    if command -v certbot >/dev/null 2>&1; then
+        success "Certbot: Installed"
+    else
+        warning "Certbot: Missing — attempting installation"
+        if apt-get install -y certbot >/dev/null 2>&1 && command -v certbot >/dev/null 2>&1; then
+            success "Certbot: Installed successfully"
+        else
+            error "Certbot: Installation failed"
+            repair_failed=1
+        fi
+    fi
+
+    # 3. Repair/enable cron for scheduled renewals
+    echo
+    echo -e "${WHITE}${BOLD}[3/5] Cron${RESET}"
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl enable --now cron >/dev/null 2>&1; then
+            success "Cron: Active"
+        elif systemctl enable --now crond >/dev/null 2>&1; then
+            success "Cron: Active (crond)"
+        else
+            warning "Cron: Could not be started"
+            repair_failed=1
+        fi
+    else
+        warning "Cron: systemctl unavailable"
+        repair_failed=1
+    fi
+
+    # 4. Check/restart the detected webserver
+    echo
+    echo -e "${WHITE}${BOLD}[4/5] Webserver${RESET}"
     detect_webserver
-    [[ ! -z "$WEBSERVER" ]] && systemctl restart $WEBSERVER
-    
-    certbot renew --dry-run >/dev/null 2>&1
-    
-    success "Auto repair completed successfully."
-    log "REPAIR" "Auto repair completed"
+    if [[ -n "$WEBSERVER" ]]; then
+        if systemctl restart "$WEBSERVER" >/dev/null 2>&1 && systemctl is-active --quiet "$WEBSERVER"; then
+            success "Webserver: $WEBSERVER restarted and active"
+        else
+            error "Webserver: $WEBSERVER restart failed"
+            repair_failed=1
+        fi
+    else
+        if systemctl is-enabled nginx >/dev/null 2>&1 || systemctl is-enabled apache2 >/dev/null 2>&1; then
+            warning "Webserver: Installed but inactive"
+        else
+            info "Webserver: None detected — skipped"
+        fi
+    fi
+
+    # 5. Test Certbot renewal without changing certificates
+    echo
+    echo -e "${WHITE}${BOLD}[5/5] SSL renewal test${RESET}"
+    if command -v certbot >/dev/null 2>&1; then
+        if certbot renew --dry-run >/tmp/certmaster-renew-test.log 2>&1; then
+            success "SSL renewal test: PASSED"
+        else
+            error "SSL renewal test: FAILED"
+            echo -e "  ${GRAY}Details: /tmp/certmaster-renew-test.log${RESET}"
+            repair_failed=1
+        fi
+    else
+        error "SSL renewal test: Certbot unavailable"
+        repair_failed=1
+    fi
+
+    echo
+    rule "$DARK_GRAY"
+    echo
+    if (( repair_failed == 0 )); then
+        success "Auto repair completed successfully. All checks passed."
+        log "REPAIR" "Auto repair completed successfully"
+    else
+        warning "Auto repair finished with one or more issues."
+        info "Review the failed checks above and /tmp/certmaster-renew-test.log if applicable."
+        log "REPAIR" "Auto repair completed with issues"
+    fi
+
     pause_screen
 }
 
@@ -1041,9 +1129,6 @@ main_menu() {
         printf "  ${BRIGHT_RED}0)${RESET} ${WHITE}Exit${RESET}  ${GRAY}Close CertMaster safely${RESET}\n"
         echo
         read -r -p "Select option [0-9]: " OPTION
-
-        # Ignore empty input so an extra ENTER never triggers an error/reload cycle.
-        [[ -z "$OPTION" ]] && continue
 
         case $OPTION in
             1) install_certificate ;;
