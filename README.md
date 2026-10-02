@@ -40,3 +40,14 @@ Clone the repository:
 
 ```bash
 git clone https://github.com/MAsterhadi/CertMaster-Pro.git ~/CertMaster-Pro
+
+
+
+**Run the installer:**
+
+sudo bash install.sh
+
+▶️ Run
+
+certmaster
+
