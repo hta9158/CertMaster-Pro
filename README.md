@@ -36,18 +36,15 @@
 
 ## 🚀 Installation
 
-Clone the repository:
+Install CertMaster-Pro with the following commands:
 
 ```bash
+# Clone the repository
 git clone https://github.com/MAsterhadi/CertMaster-Pro.git ~/CertMaster-Pro
 
+# Enter the project directory
+cd ~/CertMaster-Pro
 
-
-**Run the installer:**
-
+# Run the installer
 sudo bash install.sh
-
-▶️ Run
-
-certmaster
 
