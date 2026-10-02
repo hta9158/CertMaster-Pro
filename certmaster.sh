@@ -921,70 +921,176 @@ list_certificates() {
 # 4. DELETE CERTIFICATE (DEEP CLEAN)
 # =========================================================
 delete_certificate() {
-    ui_header
-    echo -e "${NEON_PINK}--- DELETE CERTIFICATES ---${RESET}"
-    echo
-    
-    get_scanned_domains
+    while true; do
+        ui_header
+        section_title "DELETE CERTIFICATES" "Remove certificate data and configuration."
 
-    if [ ${#CERTS_LIST[@]} -eq 0 ]; then
-        warning "No SSL certificates found to delete."
-        pause_screen
-        return
-    fi
+        get_scanned_domains
 
-    printf "${CYAN}%-4s %-65s %-15s${RESET}\n" "ID" "DOMAIN TO DELETE" "DETECTED IN"
-    echo -e "${GRAY}-----------------------------------------------------------------------------------------${RESET}"
-
-    INDEX=1
-    for item in "${CERTS_LIST[@]}"; do
-        IFS='|' read -r d_name d_days d_panel d_file <<< "$item"
-        printf "%-4s %-65s %-15s\n" "[$INDEX]" "$d_name" "$d_panel"
-        ((INDEX++))
-    done
-
-    echo
-    echo -e "${GRAY}0) Cancel and Return${RESET}"
-    echo
-    read -r -p "Certificate ID [0=Cancel]: " CHOICE
-
-    if [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -gt 0 ] && [ "$CHOICE" -le ${#CERTS_LIST[@]} ]; then
-        SELECTED_INDEX=$((CHOICE - 1))
-        IFS='|' read -r d_name d_days d_panel d_file <<< "${CERTS_LIST[$SELECTED_INDEX]}"
-        
-        echo
-        warning "You are about to completely wipe: $d_name"
-        read -r -p "Confirm deletion [y/N]: " confirm
-        
-        if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
-            progress_bar 15 "Purging $d_name from server..."
-            
-            certbot delete --cert-name "$d_name" --non-interactive >/dev/null 2>&1
-            
-            rm -rf "/etc/letsencrypt/live/$d_name" 2>/dev/null
-            rm -rf "/etc/letsencrypt/archive/$d_name" 2>/dev/null
-            rm -f "/etc/letsencrypt/renewal/$d_name.conf" 2>/dev/null
-            
-            rm -rf "/var/lib/rebecca/certs/$d_name" 2>/dev/null
-            rm -rf "/var/lib/marzban/certs/$d_name" 2>/dev/null
-            rm -rf "/var/lib/pasarguard/certs/$d_name" 2>/dev/null
-            rm -rf "/var/lib/marzneshin/certs/$d_name" 2>/dev/null
-            
-            INSTALL_PATH=$(jq -r --arg d "$d_name" '.domains[] | select(.main_domain==$d) | .install_path' "$CONFIG_FILE" 2>/dev/null)
-            if [[ ! -z "$INSTALL_PATH" && "$INSTALL_PATH" != "null" && -d "$INSTALL_PATH" ]]; then
-                rm -rf "$INSTALL_PATH" 2>/dev/null
-            fi
-
-            TMP=$(jq --arg d "$d_name" '.domains |= map(select(.main_domain != $d))' "$CONFIG_FILE" 2>/dev/null)
-            [[ ! -z "$TMP" ]] && echo "$TMP" > "$CONFIG_FILE"
-
-            success "Domain $d_name completely obliterated from the server."
-            log "DELETE" "Wiped domain $d_name"
-        else
-            info "Deletion cancelled."
+        if [ ${#CERTS_LIST[@]} -eq 0 ]; then
+            warning "No SSL certificates found to delete."
+            echo
+            echo -e "  ${BRIGHT_RED}0)${RESET} ${GRAY}Back to main menu${RESET}"
+            echo
+            read -r -p "Select option [0]: " EMPTY_CHOICE
+            return
         fi
-    fi
-    pause_screen
+
+        printf "  ${CYAN}%-4s %-50s %-18s${RESET}\n" \
+            "ID" "DOMAIN TO DELETE" "DETECTED IN"
+
+        echo -e "  ${DARK_GRAY}$(repeat_char '─' 82)${RESET}"
+
+        INDEX=1
+
+        for item in "${CERTS_LIST[@]}"; do
+            IFS='|' read -r d_name d_days d_panel d_file <<< "$item"
+
+            printf "  ${BRIGHT_RED}%-4s${RESET} %-50s %-18s\n" \
+                "[$INDEX]" \
+                "$d_name" \
+                "$d_panel"
+
+            ((INDEX++))
+        done
+
+        echo
+        echo -e "  ${BRIGHT_RED}0)${RESET} ${GRAY}Back to main menu${RESET}"
+        echo
+
+        read -r -p "Certificate ID [0=Back]: " CHOICE
+
+        # -------------------------------------------------
+        # BACK TO MAIN MENU
+        # -------------------------------------------------
+        if [[ "$CHOICE" == "0" ]]; then
+            return
+        fi
+
+        # -------------------------------------------------
+        # VALIDATE SELECTION
+        # -------------------------------------------------
+        if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || \
+           [ "$CHOICE" -lt 1 ] || \
+           [ "$CHOICE" -gt ${#CERTS_LIST[@]} ]; then
+
+            error "Invalid certificate ID."
+            sleep 1
+            continue
+        fi
+
+        SELECTED_INDEX=$((CHOICE - 1))
+
+        IFS='|' read -r d_name d_days d_panel d_file <<< \
+            "${CERTS_LIST[$SELECTED_INDEX]}"
+
+        INSTALL_PATH=$(jq -r \
+            --arg d "$d_name" \
+            '.domains[] | select(.main_domain==$d) | .install_path' \
+            "$CONFIG_FILE" 2>/dev/null)
+
+        # -------------------------------------------------
+        # CONFIRMATION SCREEN
+        # -------------------------------------------------
+        ui_header
+
+        section_title "DELETE CERTIFICATE" \
+            "Review the certificate before removing it."
+
+        echo -e "  ${GRAY}Domain:${RESET}       ${WHITE}${d_name}${RESET}"
+        echo -e "  ${GRAY}Panel:${RESET}        ${CYAN}${d_panel}${RESET}"
+        echo -e "  ${GRAY}Certificate:${RESET} ${WHITE}${d_file}${RESET}"
+
+        if [[ -n "$INSTALL_PATH" && "$INSTALL_PATH" != "null" ]]; then
+            echo -e "  ${GRAY}Install path:${RESET} ${WHITE}${INSTALL_PATH}${RESET}"
+        fi
+
+        echo
+        warning "This will remove the certificate and its stored panel files."
+        echo
+
+        read -r -p "Confirm deletion [y/N]: " confirm
+
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            info "Deletion cancelled."
+            sleep 1
+            continue
+        fi
+
+        # -------------------------------------------------
+        # DELETE
+        # -------------------------------------------------
+        echo
+
+        progress_bar 15 "Purging ${d_name} from server..."
+
+        # Certbot certificate
+        certbot delete \
+            --cert-name "$d_name" \
+            --non-interactive >/dev/null 2>&1
+
+        # Let's Encrypt files
+        rm -rf "/etc/letsencrypt/live/$d_name" 2>/dev/null
+        rm -rf "/etc/letsencrypt/archive/$d_name" 2>/dev/null
+        rm -f "/etc/letsencrypt/renewal/$d_name.conf" 2>/dev/null
+
+        # Known panel paths
+        rm -rf "/var/lib/rebecca/certs/$d_name" 2>/dev/null
+        rm -rf "/var/lib/marzban/certs/$d_name" 2>/dev/null
+        rm -rf "/var/lib/pasarguard/certs/$d_name" 2>/dev/null
+        rm -rf "/var/lib/marzneshin/certs/$d_name" 2>/dev/null
+
+        # Custom installation path stored in config
+        if [[ -n "$INSTALL_PATH" &&
+              "$INSTALL_PATH" != "null" &&
+              "$INSTALL_PATH" != "/" &&
+              -d "$INSTALL_PATH" ]]; then
+
+            rm -rf "$INSTALL_PATH" 2>/dev/null
+        fi
+
+        # Remove from CertMaster database
+        TMP=$(jq \
+            --arg d "$d_name" \
+            '.domains |= map(select(.main_domain != $d))' \
+            "$CONFIG_FILE" 2>/dev/null)
+
+        if [[ -n "$TMP" && "$TMP" != "null" ]]; then
+            echo "$TMP" > "$CONFIG_FILE"
+            chmod 600 "$CONFIG_FILE"
+        fi
+
+        log "DELETE" "Wiped domain $d_name | Panel: $d_panel"
+
+        # -------------------------------------------------
+        # RESULT
+        # -------------------------------------------------
+        ui_header
+
+        section_title "DELETE COMPLETE" \
+            "Certificate removal finished."
+
+        success "Domain ${d_name} was completely removed."
+
+        echo
+        echo -e "  ${GRAY}Domain:${RESET} ${WHITE}${d_name}${RESET}"
+        echo -e "  ${GRAY}Panel:${RESET}  ${CYAN}${d_panel}${RESET}"
+
+        echo
+        echo -e "  ${GREEN}●${RESET} Let's Encrypt data: ${GREEN}REMOVED${RESET}"
+        echo -e "  ${GREEN}●${RESET} Panel certificate: ${GREEN}REMOVED${RESET}"
+        echo -e "  ${GREEN}●${RESET} CertMaster record: ${GREEN}REMOVED${RESET}"
+
+        echo
+        echo -e "  ${CYAN}Press ENTER to return to the certificate list...${RESET}"
+        read -r
+
+        # -------------------------------------------------
+        # IMPORTANT:
+        # Do NOT return here.
+        # Loop back to DELETE CERTIFICATES.
+        # -------------------------------------------------
+    done
 }
 
 # =========================================================
