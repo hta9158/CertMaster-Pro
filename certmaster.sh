@@ -258,9 +258,14 @@ install_certificate() {
     echo -e "  ${CYAN}3)${RESET} ${WHITE}${BOLD}Rebecca${RESET}     ${GRAY}/var/lib/rebecca/certs${RESET}"
     echo -e "  ${CYAN}4)${RESET} ${WHITE}${BOLD}Custom${RESET}      ${GRAY}Custom certificate directory${RESET}"
     echo
-    read -r -p "Select panel [1-4]: " panel_choice
+    echo -e "  ${BRIGHT_RED}0)${RESET} ${GRAY}Back to main menu${RESET}"
+    echo
+    read -r -p "Select panel [0-4]: " panel_choice
 
     case $panel_choice in
+        0)
+            return
+            ;;
         1)
             TARGET_BASE_DIR="/var/lib/pasarguard/certs"
             PANEL_NAME="Pasarguard"
