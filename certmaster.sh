@@ -58,43 +58,102 @@ EOF
 fi
 
 # =========================================================
-# UI COMPONENTS
+# UI COMPONENTS - CERTMASTER CYBER CLI
 # =========================================================
-ui_header() {
-    clear
-    echo -e "${NEON_BLUE}${BOLD}"
-    echo "╭───────────────────────────────────────────────────────────────────────────────╮"
-    echo "│                       CERTMASTER ENTERPRISE v$VERSION                       │"
-    echo "│                    Advanced SSL Management Terminal UI                        │"
-    echo "╰───────────────────────────────────────────────────────────────────────────────╯"
-    echo -e "${RESET}"
+RESET='\033[0m'
+BOLD='\033[1m'
+DIM='\033[2m'
+RED='\033[1;31m'
+BRIGHT_RED='\033[38;5;196m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[38;5;51m'
+MAGENTA='\033[38;5;213m'
+WHITE='\033[1;37m'
+GRAY='\033[38;5;245m'
+DARK_GRAY='\033[38;5;239m'
+
+term_width() {
+    local w
+    w=$(tput cols 2>/dev/null || echo 80)
+    (( w < 80 )) && w=80
+    echo "$w"
 }
 
-success() { echo -e "${NEON_GREEN}[✔] $1${RESET}"; }
-error()   { echo -e "${RED}[✘] $1${RESET}"; }
-warning() { echo -e "${YELLOW}[⚠] $1${RESET}"; }
-info()    { echo -e "${CYAN}[i] $1${RESET}"; }
+line() {
+    local ch="${1:-─}"
+    printf '%*s\n' "$(term_width)" '' | tr ' ' "$ch"
+}
+
+center_text() {
+    local text="$1" width visible pad
+    width=$(term_width)
+    visible=$(printf '%b' "$text" | sed $'s/\\033\\[[0-9;]*m//g' | awk '{print length}')
+    pad=$(( (width - visible) / 2 ))
+    (( pad < 0 )) && pad=0
+    printf '%*s%b\n' "$pad" '' "$text"
+}
+
+ui_header() {
+    clear
+    local width
+    width=$(term_width)
+    echo -e "${BRIGHT_RED}${BOLD}"
+    center_text ' ██████╗███████╗██████╗ ████████╗███╗   ███╗ █████╗ ███████╗████████╗███████╗██████╗ '
+    center_text '██╔════╝██╔════╝██╔══██╗╚══██╔══╝████╗ ████║██╔══██╗██╔════╝╚══██╔══╝██╔════╝██╔══██╗'
+    center_text '██║     █████╗  ██████╔╝   ██║   ██╔████╔██║███████║███████╗   ██║   █████╗  ██████╔╝'
+    center_text '██║     ██╔══╝  ██╔══██╗   ██║   ██║╚██╔╝██║██╔══██║╚════██║   ██║   ██╔══╝  ██╔══██╗'
+    center_text '╚██████╗███████╗██║  ██║   ██║   ██║ ╚═╝ ██║██║  ██║███████║   ██║   ███████╗██║  ██║'
+    center_text ' ╚═════╝╚══════╝╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝   ╚═╝   ╚══════╝╚═╝  ╚═╝'
+    echo -e "${RESET}"
+    center_text "${CYAN}────── SSL MANAGEMENT SUITE ──────${RESET}"
+    center_text "${MAGENTA}v${VERSION}  •  CLI EDITION${RESET}"
+    echo -e "${BRIGHT_RED}$(line '─')${RESET}"
+
+    local os_name web_status cert_count renew_status
+    os_name=$( . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Linux}" )
+    if systemctl is-active nginx >/dev/null 2>&1; then web_status="Nginx";
+    elif systemctl is-active apache2 >/dev/null 2>&1; then web_status="Apache";
+    else web_status="None"; fi
+    cert_count=$(find /etc/letsencrypt/live -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+    if crontab -l 2>/dev/null | grep -q 'certbot renew'; then renew_status="ON"; else renew_status="OFF"; fi
+
+    printf "  ${CYAN}OS:${RESET} %-22s ${DARK_GRAY}|${RESET} ${CYAN}WEB:${RESET} %-10s ${DARK_GRAY}|${RESET} ${CYAN}CERTS:${RESET} %-4s ${DARK_GRAY}|${RESET} ${CYAN}AUTO-RENEW:${RESET} " "$os_name" "$web_status" "$cert_count"
+    if [[ "$renew_status" == "ON" ]]; then echo -e "${GREEN}ON${RESET} ${DARK_GRAY}|${RESET} ${CYAN}VERSION:${RESET} ${WHITE}%s${RESET}" "$VERSION"; else echo -e "${YELLOW}OFF${RESET} ${DARK_GRAY}|${RESET} ${CYAN}VERSION:${RESET} ${WHITE}%s${RESET}" "$VERSION"; fi
+    echo -e "${BRIGHT_RED}$(line '─')${RESET}"
+}
+
+success() { echo -e "${GREEN}[+]${RESET} $1"; }
+error()   { echo -e "${RED}[-]${RESET} $1"; }
+warning() { echo -e "${YELLOW}[!]${RESET} $1"; }
+info()    { echo -e "${CYAN}[i]${RESET} $1"; }
 log()     { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$1] $2" >> "$LOG_FILE"; }
 
 pause_screen() {
     echo
-    echo -e "${GRAY}Press [ENTER] to return to menu...${RESET}"
-    read -r
+    echo -e "${DARK_GRAY}──────────────────────────────────────────────────────────────────────────────${RESET}"
+    read -r -p "${CYAN}Press [ENTER] to return to menu...${RESET}"
 }
 
 progress_bar() {
-    DURATION=$1
-    TITLE=$2
-    echo -e "${NEON_PINK}➜ $TITLE${RESET}"
-    for ((i=0; i<=DURATION; i++)); do
-        PERCENT=$((i * 100 / DURATION))
-        printf "\r${NEON_BLUE}["
-        for ((j=0; j<i; j++)); do printf "█"; done
-        for ((j=i; j<DURATION; j++)); do printf "░"; done
-        printf "] %d%%${RESET}" "$PERCENT"
+    local duration="$1" title="$2" i percent filled empty
+    echo -e "${MAGENTA}>> ${title}${RESET}"
+    for ((i=0; i<=duration; i++)); do
+        percent=$((i * 100 / duration))
+        filled=$((i * 30 / duration))
+        empty=$((30-filled))
+        printf "\r${CYAN}["
+        printf '%0.s█' $(seq 1 "$filled" 2>/dev/null) 2>/dev/null
+        printf '%0.s░' $(seq 1 "$empty" 2>/dev/null) 2>/dev/null
+        printf "] ${WHITE}%3d%%${RESET}" "$percent"
         sleep 0.05
     done
     echo
+}
+
+menu_item() {
+    local n="$1" title="$2" desc="$3"
+    printf "  ${BRIGHT_RED}%-3s${RESET} ${WHITE}%-25s${RESET} ${CYAN}%s${RESET}\n" "$n)" "$title" "$desc"
 }
 
 # =========================================================
@@ -579,18 +638,24 @@ update_script() {
 main_menu() {
     while true; do
         ui_header
-        echo -e "  ${NEON_GREEN}1)${RESET} Install New SSL Certificate"
-        echo -e "  ${NEON_GREEN}2)${RESET} Wildcard SSL (Cloudflare)"
-        echo -e "  ${NEON_GREEN}3)${RESET} List Managed Certificates"
-        echo -e "  ${NEON_GREEN}4)${RESET} Delete / Wipe Certificate"
-        echo -e "  ${NEON_GREEN}5)${RESET} System Health Monitor"
-        echo -e "  ${NEON_GREEN}6)${RESET} Auto Repair System"
-        echo -e "  ${NEON_GREEN}7)${RESET} Setup Smart Auto-Renew"
-        echo -e "  ${NEON_GREEN}8)${RESET} Live Dashboard"
-        echo -e "  ${NEON_GREEN}9)${RESET} Update Script"
-        echo -e "  ${RED}0)${RESET} Exit"
         echo
-        read -p "➜ Select Option [0-9]: " OPTION
+        menu_item "1"  "Install SSL"           "Install & configure certificates"
+        menu_item "2"  "Wildcard SSL"          "Generate wildcard certificates"
+        menu_item "3"  "Manage Certificates"   "View, inspect & remove certificates"
+        menu_item "4"  "Delete / Wipe SSL"     "Completely remove a certificate"
+        menu_item "5"  "Health Check"           "Check server & SSL health"
+        menu_item "6"  "Auto Repair"            "Repair packages & SSL services"
+        menu_item "7"  "Auto Renew"             "Configure automatic renewal"
+        menu_item "8"  "Live Dashboard"         "View CertMaster status"
+        menu_item "9"  "Update"                 "Update CertMaster from GitHub"
+        echo
+        echo -e "  ${BRIGHT_RED}0)${RESET} ${WHITE}Exit${RESET}                     ${GRAY}Leave CertMaster${RESET}"
+        echo
+        echo -e "${BRIGHT_RED}$(line '─')${RESET}"
+        printf "  ${MAGENTA}●${RESET} ${CYAN}System:${RESET} ${GREEN}ONLINE${RESET}    ${DARK_GRAY}|${RESET}    ${MAGENTA}●${RESET} ${CYAN}SSL:${RESET} ${GREEN}ACTIVE${RESET}    ${DARK_GRAY}|${RESET}    ${MAGENTA}●${RESET} ${CYAN}Renewal:${RESET} ${WHITE}AUTO${RESET}\n"
+        echo -e "${BRIGHT_RED}$(line '─')${RESET}"
+        echo
+        read -r -p "${BRIGHT_RED}➜${RESET} ${WHITE}Select option [0-9]: ${RESET}" OPTION
 
         case $OPTION in
             1) install_certificate ;;
@@ -603,7 +668,7 @@ main_menu() {
             8) dashboard ;;
             9) update_script ;;
             0) clear; exit 0 ;;
-            *) error "Invalid option."; sleep 1 ;;
+            *) error "Invalid option. Please select a number from 0 to 9."; sleep 1 ;;
         esac
     done
 }
