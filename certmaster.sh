@@ -17,7 +17,9 @@ LOG_DIR="$BASE_DIR/logs"
 BACKUP_DIR="$BASE_DIR/backups"
 CONFIG_FILE="$CONFIG_DIR/settings.json"
 LOG_FILE="$LOG_DIR/activity.log"
-UPDATE_URL="https://raw.githubusercontent.com/MAsterhadi/CertMaster-Pro/main/certmaster.sh"
+UPDATE_URL="https://raw.githubusercontent.com/hta9158/CertMaster-Pro/main/certmaster.sh"
+GITHUB_URL="https://github.com/hta9158/CertMaster-Pro"
+TELEGRAM_HANDLE="@hta9158"
 
 # =========================================================
 # NEON COLORS
@@ -145,6 +147,7 @@ ui_header() {
     echo -e "  ${CYAN}SYSTEM${RESET} ${WHITE}${os_name}${RESET}"
     echo -e "  ${DARK_GRAY}·${RESET} ${GRAY}WEB${RESET} ${BLUE}${web_status}${RESET}  ${DARK_GRAY}•${RESET}  ${GRAY}CERTIFICATES${RESET} ${WHITE}${cert_count}${RESET}  ${DARK_GRAY}•${RESET}  ${GRAY}AUTO-RENEW${RESET} $([[ "$renew_status" == "ENABLED" ]] && echo -e "${GREEN}ON${RESET}" || echo -e "${YELLOW}OFF${RESET}")  ${DARK_GRAY}•${RESET}  ${GRAY}STATUS${RESET} ${GREEN}● ONLINE${RESET}"
     echo -e "${DARK_GRAY}  └$(repeat_char '─' $((inner-2)))┘${RESET}"
+    echo -e "  ${GRAY}Telegram${RESET} ${MAGENTA}${TELEGRAM_HANDLE}${RESET}  ${DARK_GRAY}•${RESET}  ${GRAY}GitHub${RESET} ${CYAN}${GITHUB_URL}${RESET}"
     echo
 }
 
@@ -684,6 +687,7 @@ main_menu() {
 
         echo
         echo -e "  ${DARK_GRAY}────────────────────────────────────────────────────────────────────────────${RESET}"
+        printf "  ${GRAY}Telegram:${RESET} ${MAGENTA}${TELEGRAM_HANDLE}${RESET}  ${DARK_GRAY}•${RESET}  ${GRAY}GitHub:${RESET} ${CYAN}${GITHUB_URL}${RESET}\n"
         printf "  ${BRIGHT_RED}0)${RESET} ${WHITE}${BOLD}Exit${RESET}  ${GRAY}Close CertMaster safely${RESET}"
         printf "                              ${GREEN}●${RESET} ${GRAY}Ready${RESET}\n"
         echo -e "  ${DARK_GRAY}────────────────────────────────────────────────────────────────────────────${RESET}"
