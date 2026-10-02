@@ -44,6 +44,10 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+# Keep the shell execution PATH intact. Runtime variables must never be named PATH.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+
 mkdir -p "$CONFIG_DIR" "$LOG_DIR" "$BACKUP_DIR"
 touch "$LOG_FILE"
 
@@ -519,13 +523,13 @@ install_certificate() {
     echo
 
     for RESULT in "${RESULTS[@]}"; do
-        IFS='|' read -r STATUS DOMAIN PATH <<< "$RESULT"
-        if [[ "$STATUS" == "OK" ]]; then
-            echo -e "  ${GREEN}●${RESET} ${WHITE}${DOMAIN}${RESET}"
-            echo -e "      ${GRAY}Certificate:${RESET} ${PATH}/fullchain.pem"
-            echo -e "      ${GRAY}Private key:${RESET} ${PATH}/privkey.pem"
+        IFS='|' read -r RESULT_STATUS RESULT_DOMAIN RESULT_PATH <<< "$RESULT"
+        if [[ "$RESULT_STATUS" == "OK" ]]; then
+            echo -e "  ${GREEN}●${RESET} ${WHITE}${RESULT_DOMAIN}${RESET}"
+            echo -e "      ${GRAY}Certificate:${RESET} ${RESULT_PATH}/fullchain.pem"
+            echo -e "      ${GRAY}Private key:${RESET} ${RESULT_PATH}/privkey.pem"
         else
-            echo -e "  ${RED}●${RESET} ${WHITE}${DOMAIN}${RESET} ${RED}FAILED${RESET}"
+            echo -e "  ${RED}●${RESET} ${WHITE}${RESULT_DOMAIN}${RESET} ${RED}FAILED${RESET}"
         fi
     done
 
