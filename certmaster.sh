@@ -247,6 +247,43 @@ telegram_alert() {
 }
 
 # =========================================================
+# PER-DOMAIN CERTIFICATE PROGRESS
+# =========================================================
+certificate_progress() {
+    local pid="$1"
+    local domain="$2"
+    local width=34
+    local percent=5
+    local filled empty
+
+    echo -e "  ${MAGENTA}◆${RESET} ${WHITE}Issuing certificate:${RESET} ${CYAN}${domain}${RESET}"
+
+    while kill -0 "$pid" 2>/dev/null; do
+        filled=$((percent * width / 100))
+        empty=$((width - filled))
+
+        printf "\r  ${BRIGHT_RED}["
+        if (( filled > 0 )); then
+            printf '%*s' "$filled" '' | tr ' ' '█'
+        fi
+        if (( empty > 0 )); then
+            printf '%*s' "$empty" '' | tr ' ' '░'
+        fi
+        printf "] ${CYAN}%3d%%${RESET}" "$percent"
+
+        if (( percent < 90 )); then
+            percent=$((percent + 2))
+        fi
+
+        sleep 0.12
+    done
+
+    printf "\r  ${BRIGHT_RED}["
+    printf '%*s' "$width" '' | tr ' ' '█'
+    printf "] ${GREEN}100%%${RESET}\n"
+}
+
+# =========================================================
 # 1. INSTALL SSL
 # =========================================================
 install_certificate() {
@@ -460,58 +497,113 @@ install_certificate() {
 
     for DOMAIN in "${DOMAINS[@]}"; do
         CURRENT_INDEX=$((SUCCESS_COUNT + FAILED_COUNT + 1))
-        echo
-        echo -e "${WHITE}${BOLD}[${CURRENT_INDEX}/${#DOMAINS[@]}] ${DOMAIN}${RESET}"
 
-        case $challenge_choice in
+        echo
+        echo -e "  ${DARK_GRAY}────────────────────────────────────────────────────────────${RESET}"
+        echo -e "  ${BRIGHT_RED}[${CURRENT_INDEX}/${#DOMAINS[@]}]${RESET} ${WHITE}${BOLD}${DOMAIN}${RESET}"
+        echo -e "  ${GRAY}Issuing independent SSL certificate...${RESET}"
+
+        CERTBOT_STATUS=1
+
+        case "$challenge_choice" in
             2)
                 certbot certonly \
                     --dns-cloudflare \
                     --dns-cloudflare-credentials /root/.secrets/cloudflare.ini \
                     -d "$DOMAIN" \
                     --non-interactive --agree-tos \
-                    --register-unsafely-without-email >/dev/null 2>&1
+                    --register-unsafely-without-email \
+                    >/tmp/certmaster-certbot.log 2>&1 &
                 ;;
+
             3)
                 certbot certonly \
                     --webroot -w "$WEBROOT_PATH" \
                     -d "$DOMAIN" \
                     --non-interactive --agree-tos \
-                    --register-unsafely-without-email >/dev/null 2>&1
+                    --register-unsafely-without-email \
+                    >/tmp/certmaster-certbot.log 2>&1 &
                 ;;
+
             4)
                 certbot certonly \
                     --standalone \
                     -d "$DOMAIN" \
                     --non-interactive --agree-tos \
-                    --register-unsafely-without-email >/dev/null 2>&1
+                    --register-unsafely-without-email \
+                    >/tmp/certmaster-certbot.log 2>&1 &
+                ;;
+
+            *)
+                CERTBOT_STATUS=1
                 ;;
         esac
 
-        CERTBOT_STATUS=$?
+        if [[ "$challenge_choice" =~ ^[234]$ ]]; then
+            CERTBOT_PID=$!
+            certificate_progress "$CERTBOT_PID" "$DOMAIN"
+            wait "$CERTBOT_PID"
+            CERTBOT_STATUS=$?
+        fi
 
-        if [[ $CERTBOT_STATUS -eq 0 && -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" && -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]]; then
+        if [[ $CERTBOT_STATUS -eq 0 && \
+              -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" && \
+              -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]]; then
+
             FINAL_PATH="$TARGET_BASE_DIR/$DOMAIN"
             mkdir -p "$FINAL_PATH"
-            cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$FINAL_PATH/fullchain.pem"
-            cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$FINAL_PATH/privkey.pem"
+
+            cp \
+                "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" \
+                "$FINAL_PATH/fullchain.pem"
+
+            cp \
+                "/etc/letsencrypt/live/$DOMAIN/privkey.pem" \
+                "$FINAL_PATH/privkey.pem"
+
             chmod 644 "$FINAL_PATH/fullchain.pem"
             chmod 600 "$FINAL_PATH/privkey.pem"
 
-            TMP=$(jq --arg d "$DOMAIN" --arg p "$FINAL_PATH" --arg pn "$PANEL_NAME" \
+            TMP=$(jq \
+                --arg d "$DOMAIN" \
+                --arg p "$FINAL_PATH" \
+                --arg pn "$PANEL_NAME" \
                 '.domains = (.domains // []) + [{"main_domain":$d,"install_path":$p,"panel":$pn}]' \
                 "$CONFIG_FILE" 2>/dev/null)
-            [[ -n "$TMP" ]] && echo "$TMP" > "$CONFIG_FILE"
+
+            if [[ -n "$TMP" && "$TMP" != "null" ]]; then
+                echo "$TMP" > "$CONFIG_FILE"
+                chmod 600 "$CONFIG_FILE"
+            fi
 
             ((SUCCESS_COUNT++))
             RESULTS+=("OK|$DOMAIN|$FINAL_PATH")
+
+            echo
             success "SSL installed: $DOMAIN"
+            echo -e "  ${GRAY}Certificate:${RESET} ${WHITE}$FINAL_PATH/fullchain.pem${RESET}"
+            echo -e "  ${GRAY}Private key:${RESET} ${WHITE}$FINAL_PATH/privkey.pem${RESET}"
+
+            log "SUCCESS" "Installed SSL for $DOMAIN | Panel: $PANEL_NAME"
+
+            telegram_alert "✅ SSL Installed
+Domain: $DOMAIN
+Panel: $PANEL_NAME
+Path: $FINAL_PATH"
+
         else
             ((FAILED_COUNT++))
             RESULTS+=("FAIL|$DOMAIN|")
+
+            echo
             error "SSL failed: $DOMAIN"
+            echo -e "  ${GRAY}Certbot log:${RESET} ${WHITE}/tmp/certmaster-certbot.log${RESET}"
+
+            log "ERROR" "SSL failed for $DOMAIN | Panel: $PANEL_NAME"
         fi
-    done
+
+        echo -e "  ${DARK_GRAY}────────────────────────────────────────────────────────────${RESET}"
+done
 
     if [[ -n "$STOPPED_WEBSERVER" ]]; then
         systemctl start "$STOPPED_WEBSERVER"
@@ -553,181 +645,31 @@ install_certificate() {
 # =========================================================
 wildcard_ssl() {
     ui_header
-    section_title "WILDCARD SSL" "Choose the target panel, then generate and install a wildcard certificate."
+    echo -e "${NEON_PINK}--- GENERATE WILDCARD SSL ---${RESET}"
+    read -r -p "Base domain: " DOMAIN
+    [[ -z "$DOMAIN" ]] && return
 
-    echo -e "  ${CYAN}1)${RESET} ${WHITE}${BOLD}Pasarguard${RESET}  ${GRAY}/var/lib/pasarguard/certs${RESET}"
-    echo -e "  ${CYAN}2)${RESET} ${WHITE}${BOLD}Marzban${RESET}     ${GRAY}/var/lib/marzban/certs${RESET}"
-    echo -e "  ${CYAN}3)${RESET} ${WHITE}${BOLD}Rebecca${RESET}     ${GRAY}/var/lib/rebecca/certs${RESET}"
-    echo -e "  ${CYAN}4)${RESET} ${WHITE}${BOLD}Custom${RESET}      ${GRAY}Custom certificate directory${RESET}"
-    echo
-    echo -e "  ${BRIGHT_RED}0)${RESET} ${GRAY}Back to main menu${RESET}"
-    echo
-    read -r -p "Select panel [0-4]: " panel_choice
-
-    case "$panel_choice" in
-        0) return ;;
-        1) TARGET_BASE_DIR="/var/lib/pasarguard/certs"; PANEL_NAME="Pasarguard" ;;
-        2) TARGET_BASE_DIR="/var/lib/marzban/certs"; PANEL_NAME="Marzban" ;;
-        3) TARGET_BASE_DIR="/var/lib/rebecca/certs"; PANEL_NAME="Rebecca" ;;
-        4)
-            read -r -p "Custom certificate directory: " TARGET_BASE_DIR
-            if [[ -z "$TARGET_BASE_DIR" || "$TARGET_BASE_DIR" != /* ]]; then
-                error "Custom path must be an absolute path."
-                pause_screen
-                return
-            fi
-            PANEL_NAME="Custom"
-            ;;
-        *)
-            error "Invalid panel choice."
-            pause_screen
-            return
-            ;;
-    esac
-
-    echo
-    success "Selected panel: ${PANEL_NAME}"
-    info "Certificate base path: ${TARGET_BASE_DIR}"
-    echo
-
-    echo -e "${WHITE}${BOLD}WILDCARD DOMAIN${RESET}"
-    echo -e "  ${GRAY}Enter the base domain without *.${RESET}"
-    echo -e "  ${GRAY}Example: example.com${RESET}"
-    echo
-    read -r -p "Domain: " DOMAIN
-
-    DOMAIN="${DOMAIN#https://}"
-    DOMAIN="${DOMAIN#http://}"
-    DOMAIN="${DOMAIN#*.}"
-    DOMAIN="${DOMAIN%%/*}"
-    DOMAIN="${DOMAIN,,}"
-
-    if [[ -z "$DOMAIN" ]]; then
-        error "No domain entered."
-        pause_screen
-        return
-    fi
-
-    if [[ ! "$DOMAIN" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]]; then
-        error "Invalid domain: $DOMAIN"
-        pause_screen
-        return
-    fi
-
-    WILDCARD_DOMAIN="*.${DOMAIN}"
-    FINAL_PATH="${TARGET_BASE_DIR}/${DOMAIN}"
-    CERT_FILE="${FINAL_PATH}/fullchain.pem"
-    KEY_FILE="${FINAL_PATH}/privkey.pem"
-
-    echo
-    echo -e "${WHITE}${BOLD}CERTIFICATE TARGET${RESET}"
-    echo -e "  ${GRAY}Panel:${RESET}        ${WHITE}${PANEL_NAME}${RESET}"
-    echo -e "  ${GRAY}Base path:${RESET}    ${WHITE}${TARGET_BASE_DIR}${RESET}"
-    echo -e "  ${GRAY}Domain:${RESET}       ${WHITE}${DOMAIN}${RESET}"
-    echo -e "  ${GRAY}Wildcard:${RESET}     ${WHITE}${WILDCARD_DOMAIN}${RESET}"
-    echo
-
-    # Wildcard certificates require DNS-01 validation.
-    CF_EMAIL=$(jq -r '.cloudflare_email // empty' "$CONFIG_FILE" 2>/dev/null)
-    CF_KEY=$(jq -r '.cloudflare_api_key // empty' "$CONFIG_FILE" 2>/dev/null)
-
-    if [[ -z "$CF_EMAIL" || -z "$CF_KEY" ]]; then
-        echo -e "${WHITE}${BOLD}CLOUDFLARE DNS${RESET}"
-        echo -e "  ${GRAY}Wildcard SSL requires DNS validation.${RESET}"
-        echo
+    CF_EMAIL=$(jq -r '.cloudflare_email' "$CONFIG_FILE")
+    CF_KEY=$(jq -r '.cloudflare_api_key' "$CONFIG_FILE")
+    if [[ -z "$CF_EMAIL" || "$CF_EMAIL" == "null" ]]; then
         read -r -p "Cloudflare Email: " CF_EMAIL
-        read -r -s -p "Cloudflare API Key: " CF_KEY
-        echo
-
-        if [[ -z "$CF_EMAIL" || -z "$CF_KEY" ]]; then
-            error "Cloudflare credentials cannot be empty."
-            pause_screen
-            return
-        fi
-
-        TMP=$(jq --arg e "$CF_EMAIL" --arg k "$CF_KEY" \
-            '.cloudflare_email=$e | .cloudflare_api_key=$k' "$CONFIG_FILE" 2>/dev/null)
-        if [[ -n "$TMP" && "$TMP" != "null" ]]; then
-            echo "$TMP" > "$CONFIG_FILE"
-            chmod 600 "$CONFIG_FILE"
-        fi
+        read -r -p "Cloudflare API Key: " CF_KEY
+        TMP=$(jq --arg e "$CF_EMAIL" --arg k "$CF_KEY" '.cloudflare_email=$e | .cloudflare_api_key=$k' "$CONFIG_FILE")
+        echo "$TMP" > "$CONFIG_FILE"
     fi
-
-    CF_DIR="/root/.secrets"
-    CF_CREDENTIALS="${CF_DIR}/cloudflare.ini"
-    mkdir -p "$CF_DIR"
-    printf 'dns_cloudflare_email = %s\ndns_cloudflare_api_key = %s\n' \
-        "$CF_EMAIL" "$CF_KEY" > "$CF_CREDENTIALS"
-    chmod 600 "$CF_CREDENTIALS"
-
-    mkdir -p "$FINAL_PATH"
+    mkdir -p ~/.secrets
+    echo -e "dns_cloudflare_email = $CF_EMAIL\ndns_cloudflare_api_key = $CF_KEY" > ~/.secrets/cloudflare.ini
+    chmod 600 ~/.secrets/cloudflare.ini
 
     echo
-    progress_bar 25 "Requesting Wildcard SSL for ${DOMAIN}..."
-
-    certbot certonly \
-        --dns-cloudflare \
-        --dns-cloudflare-credentials "$CF_CREDENTIALS" \
-        --preferred-challenges dns-01 \
-        --non-interactive \
-        --agree-tos \
-        --register-unsafely-without-email \
-        -d "$DOMAIN" \
-        -d "$WILDCARD_DOMAIN" \
-        >/tmp/certmaster_wildcard.log 2>&1
-
-    CERTBOT_STATUS=$?
-
-    if [[ $CERTBOT_STATUS -eq 0 ]]; then
-        LETSENCRYPT_PATH="/etc/letsencrypt/live/${DOMAIN}"
-
-        if [[ ! -f "${LETSENCRYPT_PATH}/fullchain.pem" || ! -f "${LETSENCRYPT_PATH}/privkey.pem" ]]; then
-            error "Certbot completed but certificate files were not found."
-            pause_screen
-            return
-        fi
-
-        cp -L "${LETSENCRYPT_PATH}/fullchain.pem" "$CERT_FILE"
-        cp -L "${LETSENCRYPT_PATH}/privkey.pem" "$KEY_FILE"
-        chmod 644 "$CERT_FILE"
-        chmod 600 "$KEY_FILE"
-
-        TMP=$(jq --arg d "$DOMAIN" --arg p "$FINAL_PATH" --arg pn "$PANEL_NAME" \
-            '.domains = (.domains // []) | map(select(.main_domain != $d or .panel != $pn)) + [{"main_domain":$d,"install_path":$p,"panel":$pn,"wildcard":true}]' \
-            "$CONFIG_FILE" 2>/dev/null)
-        if [[ -n "$TMP" && "$TMP" != "null" ]]; then
-            echo "$TMP" > "$CONFIG_FILE"
-            chmod 600 "$CONFIG_FILE"
-        fi
-
-        echo
-        section_title "WILDCARD SSL INSTALLED" "Certificate installation completed successfully."
-        printf "  ${GRAY}Panel:${RESET}        ${WHITE}%s${RESET}\n" "$PANEL_NAME"
-        printf "  ${GRAY}Base path:${RESET}    ${WHITE}%s${RESET}\n" "$TARGET_BASE_DIR"
-        printf "  ${GRAY}Domain:${RESET}       ${WHITE}%s${RESET}\n" "$DOMAIN"
-        printf "  ${GRAY}Wildcard:${RESET}     ${WHITE}%s${RESET}\n" "$WILDCARD_DOMAIN"
-        echo
-        printf "  ${GRAY}Certificate:${RESET}  ${GREEN}%s${RESET}\n" "$CERT_FILE"
-        printf "  ${GRAY}Private key:${RESET}  ${GREEN}%s${RESET}\n" "$KEY_FILE"
-        echo
-        success "Wildcard SSL installed successfully."
-
-        log "SUCCESS" "Wildcard SSL installed for ${WILDCARD_DOMAIN} | Panel: ${PANEL_NAME} | Path: ${FINAL_PATH}"
-        telegram_alert "✅ CertMaster Wildcard SSL Installed
-Domain: ${WILDCARD_DOMAIN}
-Panel: ${PANEL_NAME}
-Path: ${FINAL_PATH}"
+    progress_bar 25 "Requesting Wildcard Certificate..."
+    certbot certonly --dns-cloudflare --dns-cloudflare-credentials ~/.secrets/cloudflare.ini -d "*.$DOMAIN" -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email >/dev/null 2>&1
+    
+    if [ $? -eq 0 ]; then
+        success "Wildcard SSL generated successfully for *.$DOMAIN!"
     else
         error "Failed to generate Wildcard SSL."
-        echo
-        echo -e "  ${GRAY}Certbot log:${RESET} ${WHITE}/tmp/certmaster_wildcard.log${RESET}"
-        echo
-        if [[ -f /tmp/certmaster_wildcard.log ]]; then
-            tail -n 15 /tmp/certmaster_wildcard.log
-        fi
-        log "ERROR" "Wildcard SSL failed for ${WILDCARD_DOMAIN} | Panel: ${PANEL_NAME}"
     fi
-
     pause_screen
 }
 
@@ -795,302 +737,120 @@ get_scanned_domains() {
 # 3. LIST CERTIFICATES
 # =========================================================
 list_certificates() {
-    while true; do
-        ui_header
-        section_title "MANAGED CERTIFICATES" "Inspect, list and manage your SSL certificates."
+    ui_header
+    echo -e "${NEON_PINK}--- MANAGED CERTIFICATES ---${RESET}"
+    echo
+    
+    get_scanned_domains
 
-        get_scanned_domains
+    if [ ${#CERTS_LIST[@]} -eq 0 ]; then
+        warning "No valid SSL certificates found on the server."
+        pause_screen
+        return
+    fi
 
-        if [ ${#CERTS_LIST[@]} -eq 0 ]; then
-            warning "No valid SSL certificates found on the server."
-            echo
-            echo -e "  ${BRIGHT_RED}0)${RESET} ${GRAY}Back to main menu${RESET}"
-            echo
-            read -r -p "Select option [0]: " EMPTY_CHOICE
-            return
-        fi
+    printf "${CYAN}%-4s %-65s %-15s %-10s %-8s${RESET}\n" "ID" "DOMAIN" "PANEL" "DAYS LEFT" "GRADE"
+    echo -e "${GRAY}-------------------------------------------------------------------------------------------------------------${RESET}"
 
-        printf "  ${CYAN}%-4s %-45s %-16s %-12s %-8s${RESET}\n" \
-            "ID" "DOMAIN" "PANEL" "DAYS LEFT" "GRADE"
-
-        echo -e "  ${DARK_GRAY}$(repeat_char '─' 92)${RESET}"
-
-        INDEX=1
-
-        for item in "${CERTS_LIST[@]}"; do
-            IFS='|' read -r d_name d_days d_panel d_file <<< "$item"
-
-            GRADE=$(ssl_grade "$d_days")
-
-            printf "  ${BRIGHT_RED}%-4s${RESET} %-45s %-16s %-12s %-8b\n" \
-                "[$INDEX]" \
-                "$d_name" \
-                "$d_panel" \
-                "$d_days" \
-                "$GRADE"
-
-            ((INDEX++))
-        done
-
-        echo
-        echo -e "  ${BRIGHT_RED}0)${RESET} ${GRAY}Back to main menu${RESET}"
-        echo
-
-        read -r -p "Select certificate [0=Back]: " CHOICE
-
-        # -------------------------------------------------
-        # BACK TO MAIN MENU
-        # -------------------------------------------------
-        if [[ "$CHOICE" == "0" ]]; then
-            return
-        fi
-
-        # -------------------------------------------------
-        # INVALID INPUT
-        # -------------------------------------------------
-        if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || \
-           [ "$CHOICE" -lt 1 ] || \
-           [ "$CHOICE" -gt ${#CERTS_LIST[@]} ]; then
-
-            error "Invalid certificate ID."
-            sleep 1
-            continue
-        fi
-
-        # -------------------------------------------------
-        # SELECT CERTIFICATE
-        # -------------------------------------------------
-        SELECTED_INDEX=$((CHOICE - 1))
-
-        IFS='|' read -r d_name d_days d_panel d_file <<< \
-            "${CERTS_LIST[$SELECTED_INDEX]}"
-
-        CERT_DIR=$(dirname "$d_file")
-
-        # -------------------------------------------------
-        # CERTIFICATE DETAILS LOOP
-        # -------------------------------------------------
-        while true; do
-            ui_header
-
-            section_title "CERTIFICATE DETAILS" \
-                "Detailed information for ${d_name}"
-
-            echo -e "  ${GRAY}Domain:${RESET}        ${WHITE}${d_name}${RESET}"
-            echo -e "  ${GRAY}Panel:${RESET}         ${CYAN}${d_panel}${RESET}"
-            echo -e "  ${GRAY}Certificate:${RESET}  ${WHITE}${CERT_DIR}/fullchain.pem${RESET}"
-            echo -e "  ${GRAY}Private key:${RESET}  ${WHITE}${CERT_DIR}/privkey.pem${RESET}"
-            echo -e "  ${GRAY}Days left:${RESET}     ${WHITE}${d_days} days${RESET}"
-            echo -e "  ${GRAY}SSL Grade:${RESET}     $(ssl_grade "$d_days")"
-
-            echo
-
-            # Check actual certificate files
-            if [[ -f "${CERT_DIR}/fullchain.pem" ]]; then
-                echo -e "  ${GREEN}●${RESET} Certificate file: ${GREEN}FOUND${RESET}"
-            else
-                echo -e "  ${RED}●${RESET} Certificate file: ${RED}MISSING${RESET}"
-            fi
-
-            if [[ -f "${CERT_DIR}/privkey.pem" ]]; then
-                echo -e "  ${GREEN}●${RESET} Private key: ${GREEN}FOUND${RESET}"
-            else
-                echo -e "  ${RED}●${RESET} Private key: ${RED}MISSING${RESET}"
-            fi
-
-            echo
-            echo -e "  ${BRIGHT_RED}0)${RESET} ${GRAY}Back to Managed Certificates${RESET}"
-            echo
-
-            read -r -p "Select option [0=Back]: " DETAIL_CHOICE
-
-            if [[ "$DETAIL_CHOICE" == "0" ]]; then
-                break
-            fi
-
-            warning "Invalid option."
-            sleep 1
-        done
-
-        # Continue the Managed Certificates list
-        # instead of returning to the main menu.
+    INDEX=1
+    for item in "${CERTS_LIST[@]}"; do
+        IFS='|' read -r d_name d_days d_panel d_file <<< "$item"
+        GRADE=$(ssl_grade "$d_days")
+        printf "%-4s %-65s %-15s %-10s %-8b\n" "[$INDEX]" "$d_name" "$d_panel" "$d_days" "$GRADE"
+        ((INDEX++))
     done
+
+    echo
+    echo -e "${GRAY}0) Return to Main Menu${RESET}"
+    echo
+    read -r -p "Select ID [0=Back]: " CHOICE
+
+    if [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -gt 0 ] && [ "$CHOICE" -le ${#CERTS_LIST[@]} ]; then
+        SELECTED_INDEX=$((CHOICE - 1))
+        IFS='|' read -r d_name d_days d_panel d_file <<< "${CERTS_LIST[$SELECTED_INDEX]}"
+        
+        CERT_DIR=$(dirname "$d_file")
+        
+        ui_header
+        echo -e "${NEON_PINK}--- CERTIFICATE DETAILS ---${RESET}"
+        echo -e "${CYAN}🌐 Domain:${RESET}       $d_name"
+        echo -e "${CYAN}📦 Active Panel:${RESET} $d_panel"
+        echo -e "${CYAN}📂 Cert File:${RESET}    $CERT_DIR/fullchain.pem"
+        echo -e "${CYAN}🔑 Private Key:${RESET}  $CERT_DIR/privkey.pem"
+        echo -e "${CYAN}⏳ Days Left:${RESET}    $d_days days"
+        echo -e "${CYAN}🏆 SSL Grade:${RESET}    $(ssl_grade "$d_days")"
+    fi
+    pause_screen
 }
 
 # =========================================================
 # 4. DELETE CERTIFICATE (DEEP CLEAN)
 # =========================================================
 delete_certificate() {
-    while true; do
-        ui_header
-        section_title "DELETE CERTIFICATES" "Remove certificate data and configuration."
+    ui_header
+    echo -e "${NEON_PINK}--- DELETE CERTIFICATES ---${RESET}"
+    echo
+    
+    get_scanned_domains
 
-        get_scanned_domains
+    if [ ${#CERTS_LIST[@]} -eq 0 ]; then
+        warning "No SSL certificates found to delete."
+        pause_screen
+        return
+    fi
 
-        if [ ${#CERTS_LIST[@]} -eq 0 ]; then
-            warning "No SSL certificates found to delete."
-            echo
-            echo -e "  ${BRIGHT_RED}0)${RESET} ${GRAY}Back to main menu${RESET}"
-            echo
-            read -r -p "Select option [0]: " EMPTY_CHOICE
-            return
-        fi
+    printf "${CYAN}%-4s %-65s %-15s${RESET}\n" "ID" "DOMAIN TO DELETE" "DETECTED IN"
+    echo -e "${GRAY}-----------------------------------------------------------------------------------------${RESET}"
 
-        printf "  ${CYAN}%-4s %-50s %-18s${RESET}\n" \
-            "ID" "DOMAIN TO DELETE" "DETECTED IN"
-
-        echo -e "  ${DARK_GRAY}$(repeat_char '─' 82)${RESET}"
-
-        INDEX=1
-
-        for item in "${CERTS_LIST[@]}"; do
-            IFS='|' read -r d_name d_days d_panel d_file <<< "$item"
-
-            printf "  ${BRIGHT_RED}%-4s${RESET} %-50s %-18s\n" \
-                "[$INDEX]" \
-                "$d_name" \
-                "$d_panel"
-
-            ((INDEX++))
-        done
-
-        echo
-        echo -e "  ${BRIGHT_RED}0)${RESET} ${GRAY}Back to main menu${RESET}"
-        echo
-
-        read -r -p "Certificate ID [0=Back]: " CHOICE
-
-        # -------------------------------------------------
-        # BACK TO MAIN MENU
-        # -------------------------------------------------
-        if [[ "$CHOICE" == "0" ]]; then
-            return
-        fi
-
-        # -------------------------------------------------
-        # VALIDATE SELECTION
-        # -------------------------------------------------
-        if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || \
-           [ "$CHOICE" -lt 1 ] || \
-           [ "$CHOICE" -gt ${#CERTS_LIST[@]} ]; then
-
-            error "Invalid certificate ID."
-            sleep 1
-            continue
-        fi
-
-        SELECTED_INDEX=$((CHOICE - 1))
-
-        IFS='|' read -r d_name d_days d_panel d_file <<< \
-            "${CERTS_LIST[$SELECTED_INDEX]}"
-
-        INSTALL_PATH=$(jq -r \
-            --arg d "$d_name" \
-            '.domains[] | select(.main_domain==$d) | .install_path' \
-            "$CONFIG_FILE" 2>/dev/null)
-
-        # -------------------------------------------------
-        # CONFIRMATION SCREEN
-        # -------------------------------------------------
-        ui_header
-
-        section_title "DELETE CERTIFICATE" \
-            "Review the certificate before removing it."
-
-        echo -e "  ${GRAY}Domain:${RESET}       ${WHITE}${d_name}${RESET}"
-        echo -e "  ${GRAY}Panel:${RESET}        ${CYAN}${d_panel}${RESET}"
-        echo -e "  ${GRAY}Certificate:${RESET} ${WHITE}${d_file}${RESET}"
-
-        if [[ -n "$INSTALL_PATH" && "$INSTALL_PATH" != "null" ]]; then
-            echo -e "  ${GRAY}Install path:${RESET} ${WHITE}${INSTALL_PATH}${RESET}"
-        fi
-
-        echo
-        warning "This will remove the certificate and its stored panel files."
-        echo
-
-        read -r -p "Confirm deletion [y/N]: " confirm
-
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            info "Deletion cancelled."
-            sleep 1
-            continue
-        fi
-
-        # -------------------------------------------------
-        # DELETE
-        # -------------------------------------------------
-        echo
-
-        progress_bar 15 "Purging ${d_name} from server..."
-
-        # Certbot certificate
-        certbot delete \
-            --cert-name "$d_name" \
-            --non-interactive >/dev/null 2>&1
-
-        # Let's Encrypt files
-        rm -rf "/etc/letsencrypt/live/$d_name" 2>/dev/null
-        rm -rf "/etc/letsencrypt/archive/$d_name" 2>/dev/null
-        rm -f "/etc/letsencrypt/renewal/$d_name.conf" 2>/dev/null
-
-        # Known panel paths
-        rm -rf "/var/lib/rebecca/certs/$d_name" 2>/dev/null
-        rm -rf "/var/lib/marzban/certs/$d_name" 2>/dev/null
-        rm -rf "/var/lib/pasarguard/certs/$d_name" 2>/dev/null
-        rm -rf "/var/lib/marzneshin/certs/$d_name" 2>/dev/null
-
-        # Custom installation path stored in config
-        if [[ -n "$INSTALL_PATH" &&
-              "$INSTALL_PATH" != "null" &&
-              "$INSTALL_PATH" != "/" &&
-              -d "$INSTALL_PATH" ]]; then
-
-            rm -rf "$INSTALL_PATH" 2>/dev/null
-        fi
-
-        # Remove from CertMaster database
-        TMP=$(jq \
-            --arg d "$d_name" \
-            '.domains |= map(select(.main_domain != $d))' \
-            "$CONFIG_FILE" 2>/dev/null)
-
-        if [[ -n "$TMP" && "$TMP" != "null" ]]; then
-            echo "$TMP" > "$CONFIG_FILE"
-            chmod 600 "$CONFIG_FILE"
-        fi
-
-        log "DELETE" "Wiped domain $d_name | Panel: $d_panel"
-
-        # -------------------------------------------------
-        # RESULT
-        # -------------------------------------------------
-        ui_header
-
-        section_title "DELETE COMPLETE" \
-            "Certificate removal finished."
-
-        success "Domain ${d_name} was completely removed."
-
-        echo
-        echo -e "  ${GRAY}Domain:${RESET} ${WHITE}${d_name}${RESET}"
-        echo -e "  ${GRAY}Panel:${RESET}  ${CYAN}${d_panel}${RESET}"
-
-        echo
-        echo -e "  ${GREEN}●${RESET} Let's Encrypt data: ${GREEN}REMOVED${RESET}"
-        echo -e "  ${GREEN}●${RESET} Panel certificate: ${GREEN}REMOVED${RESET}"
-        echo -e "  ${GREEN}●${RESET} CertMaster record: ${GREEN}REMOVED${RESET}"
-
-        echo
-        echo -e "  ${CYAN}Press ENTER to return to the certificate list...${RESET}"
-        read -r
-
-        # -------------------------------------------------
-        # IMPORTANT:
-        # Do NOT return here.
-        # Loop back to DELETE CERTIFICATES.
-        # -------------------------------------------------
+    INDEX=1
+    for item in "${CERTS_LIST[@]}"; do
+        IFS='|' read -r d_name d_days d_panel d_file <<< "$item"
+        printf "%-4s %-65s %-15s\n" "[$INDEX]" "$d_name" "$d_panel"
+        ((INDEX++))
     done
+
+    echo
+    echo -e "${GRAY}0) Cancel and Return${RESET}"
+    echo
+    read -r -p "Certificate ID [0=Cancel]: " CHOICE
+
+    if [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -gt 0 ] && [ "$CHOICE" -le ${#CERTS_LIST[@]} ]; then
+        SELECTED_INDEX=$((CHOICE - 1))
+        IFS='|' read -r d_name d_days d_panel d_file <<< "${CERTS_LIST[$SELECTED_INDEX]}"
+        
+        echo
+        warning "You are about to completely wipe: $d_name"
+        read -r -p "Confirm deletion [y/N]: " confirm
+        
+        if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+            progress_bar 15 "Purging $d_name from server..."
+            
+            certbot delete --cert-name "$d_name" --non-interactive >/dev/null 2>&1
+            
+            rm -rf "/etc/letsencrypt/live/$d_name" 2>/dev/null
+            rm -rf "/etc/letsencrypt/archive/$d_name" 2>/dev/null
+            rm -f "/etc/letsencrypt/renewal/$d_name.conf" 2>/dev/null
+            
+            rm -rf "/var/lib/rebecca/certs/$d_name" 2>/dev/null
+            rm -rf "/var/lib/marzban/certs/$d_name" 2>/dev/null
+            rm -rf "/var/lib/pasarguard/certs/$d_name" 2>/dev/null
+            rm -rf "/var/lib/marzneshin/certs/$d_name" 2>/dev/null
+            
+            INSTALL_PATH=$(jq -r --arg d "$d_name" '.domains[] | select(.main_domain==$d) | .install_path' "$CONFIG_FILE" 2>/dev/null)
+            if [[ ! -z "$INSTALL_PATH" && "$INSTALL_PATH" != "null" && -d "$INSTALL_PATH" ]]; then
+                rm -rf "$INSTALL_PATH" 2>/dev/null
+            fi
+
+            TMP=$(jq --arg d "$d_name" '.domains |= map(select(.main_domain != $d))' "$CONFIG_FILE" 2>/dev/null)
+            [[ ! -z "$TMP" ]] && echo "$TMP" > "$CONFIG_FILE"
+
+            success "Domain $d_name completely obliterated from the server."
+            log "DELETE" "Wiped domain $d_name"
+        else
+            info "Deletion cancelled."
+        fi
+    fi
+    pause_screen
 }
 
 # =========================================================
