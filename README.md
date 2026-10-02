@@ -1,19 +1,42 @@
 # CertMaster-Pro
 
-Professional SSL Certificate Manager for Linux
+<p align="center">
+  <img src="assets/menu.png" alt="CertMaster-Pro CLI" width="850">
+</p>
 
-## Installation
+<p align="center">
+  <b>Professional SSL Certificate Manager for Linux</b>
+</p>
+
+<p align="center">
+  Secure • Automated • Reliable
+</p>
+
+---
+
+## ✨ Features
+
+- 🔐 SSL Certificate Installation
+- 🌐 Wildcard SSL Certificate Support
+- 📋 Managed Certificates
+- 🗑️ Certificate Delete / Wipe
+- 🔄 Automatic SSL Renewal
+- ⏰ Auto-Renew Scheduler
+- 🔍 Automatic Certificate Scanning
+- 🩺 SSL & System Health Check
+- 🔧 System Auto Repair
+- 📊 Live Dashboard
+- 🌐 Web Server Detection
+- 🧪 SSL Renewal Testing
+- ⬆️ Built-in GitHub Update System
+- 📝 Certificate & System Logs
+- 🛡️ Certbot Integration
+
+---
+
+## 🚀 Installation
+
+Clone the repository:
 
 ```bash
 git clone https://github.com/MAsterhadi/CertMaster-Pro.git ~/CertMaster-Pro
-
-cd ~/CertMaster-Pro
-
-sudo bash install.sh
-```
-
-## Run
-
-```bash
-certmaster
-```
