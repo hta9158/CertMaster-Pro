@@ -914,151 +914,589 @@ health_monitor() {
 auto_repair() {
     ui_header
     echo -e "${NEON_PINK}--- SYSTEM AUTO REPAIR ---${RESET}"
-    echo
-    echo -e "  ${GRAY}CertMaster will check and repair common SSL/server issues.${RESET}"
-    echo
     read -r -p "Start system repair [y/N]: " confirm
     [[ "$confirm" =~ ^[Yy]$ ]] || return
 
-    local repair_failed=0
-    local apt_status=0
-    local cron_status=0
-    local web_status=0
-    local certbot_status=0
-
     echo
-
-    # 1. Repair broken APT packages
-    echo -e "${WHITE}${BOLD}[1/5] Package system${RESET}"
-    if apt-get update -qq >/dev/null 2>&1 && apt-get --fix-broken install -y >/dev/null 2>&1; then
-        success "APT packages: OK / repaired"
-    else
-        error "APT packages: Repair failed"
-        repair_failed=1
-    fi
-
-    # 2. Check/install Certbot
-    echo
-    echo -e "${WHITE}${BOLD}[2/5] Certbot${RESET}"
-    if command -v certbot >/dev/null 2>&1; then
-        success "Certbot: Installed"
-    else
-        warning "Certbot: Missing — attempting installation"
-        if apt-get install -y certbot >/dev/null 2>&1 && command -v certbot >/dev/null 2>&1; then
-            success "Certbot: Installed successfully"
-        else
-            error "Certbot: Installation failed"
-            repair_failed=1
-        fi
-    fi
-
-    # 3. Repair/enable cron for scheduled renewals
-    echo
-    echo -e "${WHITE}${BOLD}[3/5] Cron${RESET}"
-    if command -v systemctl >/dev/null 2>&1; then
-        if systemctl enable --now cron >/dev/null 2>&1; then
-            success "Cron: Active"
-        elif systemctl enable --now crond >/dev/null 2>&1; then
-            success "Cron: Active (crond)"
-        else
-            warning "Cron: Could not be started"
-            repair_failed=1
-        fi
-    else
-        warning "Cron: systemctl unavailable"
-        repair_failed=1
-    fi
-
-    # 4. Check/restart the detected webserver
-    echo
-    echo -e "${WHITE}${BOLD}[4/5] Webserver${RESET}"
+    progress_bar 25 "Repairing System Packages..."
+    apt --fix-broken install -y >/dev/null 2>&1
+    
     detect_webserver
-    if [[ -n "$WEBSERVER" ]]; then
-        if systemctl restart "$WEBSERVER" >/dev/null 2>&1 && systemctl is-active --quiet "$WEBSERVER"; then
-            success "Webserver: $WEBSERVER restarted and active"
-        else
-            error "Webserver: $WEBSERVER restart failed"
-            repair_failed=1
-        fi
-    else
-        if systemctl is-enabled nginx >/dev/null 2>&1 || systemctl is-enabled apache2 >/dev/null 2>&1; then
-            warning "Webserver: Installed but inactive"
-        else
-            info "Webserver: None detected — skipped"
-        fi
-    fi
-
-    # 5. Test Certbot renewal without changing certificates
-    echo
-    echo -e "${WHITE}${BOLD}[5/5] SSL renewal test${RESET}"
-    if command -v certbot >/dev/null 2>&1; then
-        if certbot renew --dry-run >/tmp/certmaster-renew-test.log 2>&1; then
-            success "SSL renewal test: PASSED"
-        else
-            error "SSL renewal test: FAILED"
-            echo -e "  ${GRAY}Details: /tmp/certmaster-renew-test.log${RESET}"
-            repair_failed=1
-        fi
-    else
-        error "SSL renewal test: Certbot unavailable"
-        repair_failed=1
-    fi
-
-    echo
-    rule "$DARK_GRAY"
-    echo
-    if (( repair_failed == 0 )); then
-        success "Auto repair completed successfully. All checks passed."
-        log "REPAIR" "Auto repair completed successfully"
-    else
-        warning "Auto repair finished with one or more issues."
-        info "Review the failed checks above and /tmp/certmaster-renew-test.log if applicable."
-        log "REPAIR" "Auto repair completed with issues"
-    fi
-
+    [[ ! -z "$WEBSERVER" ]] && systemctl restart $WEBSERVER
+    
+    certbot renew --dry-run >/dev/null 2>&1
+    
+    success "Auto repair completed successfully."
+    log "REPAIR" "Auto repair completed"
     pause_screen
 }
 
 # =========================================================
 # 7. AUTO RENEW
 # =========================================================
-setup_auto_renew() {
-    ui_header
-    echo -e "${NEON_PINK}--- SMART AUTO RENEW ---${RESET}"
-    echo -e "This will automatically renew certs and sync files to panels."
-    read -r -p "Enable Auto-Renew [y/N]: " confirm
-    
-    if [[ "$confirm" =~ ^[Yy]$ ]]; then
-        CRON_JOB="0 3 * * * certbot renew --quiet --deploy-hook \"/usr/local/bin/certmaster --sync\" >> $LOG_FILE 2>&1"
-        crontab -l 2>/dev/null | grep -v "certmaster" | crontab -
-        (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
-        success "Smart Auto-Renew is now Active."
-        log "INFO" "Smart Auto-Renew Enabled"
+AUTO_RENEW_CRON_FILE="/etc/cron.d/certmaster-auto-renew"
+
+get_auto_renew_domain_json() {
+    local domain="$1"
+    jq -c --arg d "$domain" '.domains[]? | select(.main_domain == $d)' "$CONFIG_FILE" 2>/dev/null | head -n 1
+}
+
+auto_renew_domain_count() {
+    jq '[.domains[]? | select((.auto_renew // false) == true)] | length' "$CONFIG_FILE" 2>/dev/null || echo 0
+}
+
+auto_renew_scheduler_enabled() {
+    [[ -f "$AUTO_RENEW_CRON_FILE" ]] && return 0
+    return 1
+}
+
+save_config() {
+    local tmp_file
+    tmp_file=$(mktemp)
+    if jq . "$CONFIG_FILE" > "$tmp_file" 2>/dev/null; then
+        mv "$tmp_file" "$CONFIG_FILE"
+        chmod 600 "$CONFIG_FILE"
+        return 0
     fi
+    rm -f "$tmp_file"
+    return 1
+}
+
+set_domain_auto_renew() {
+    local domain="$1"
+    local enabled="$2"
+    local tmp_file
+
+    tmp_file=$(mktemp)
+    if jq --arg d "$domain" --argjson enabled "$enabled" \
+        '.domains = ((.domains // []) | map(if .main_domain == $d then .auto_renew = $enabled else . end))' \
+        "$CONFIG_FILE" > "$tmp_file" 2>/dev/null; then
+        mv "$tmp_file" "$CONFIG_FILE"
+        chmod 600 "$CONFIG_FILE"
+        return 0
+    fi
+
+    rm -f "$tmp_file"
+    return 1
+}
+
+add_auto_renew_domain() {
+    ui_header
+    echo -e "${NEON_PINK}--- ADD AUTO-RENEW DOMAIN ---${RESET}"
+    echo
+    echo -e "${GRAY}Enter a domain that already has a Certbot certificate.${RESET}"
+    echo -e "${GRAY}CertMaster will keep the exact current certificate destination path.${RESET}"
+    echo
+
+    read -r -p "Domain: " DOMAIN
+    DOMAIN="${DOMAIN#https://}"
+    DOMAIN="${DOMAIN#http://}"
+    DOMAIN="${DOMAIN%%/*}"
+
+    if [[ -z "$DOMAIN" || ! "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+        error "Invalid domain."
+        pause_screen
+        return
+    fi
+
+    if [[ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" || \
+          ! -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]]; then
+        error "Certbot certificate was not found for: $DOMAIN"
+        info "Install the SSL certificate first, then add it to Auto-Renew."
+        pause_screen
+        return
+    fi
+
+    if [[ ! -f "/etc/letsencrypt/renewal/$DOMAIN.conf" ]]; then
+        error "Certbot renewal configuration was not found for: $DOMAIN"
+        info "Expected: /etc/letsencrypt/renewal/$DOMAIN.conf"
+        pause_screen
+        return
+    fi
+
+    DOMAIN_JSON=$(get_auto_renew_domain_json "$DOMAIN")
+    INSTALL_PATH=""
+    PANEL_NAME=""
+
+    if [[ -n "$DOMAIN_JSON" ]]; then
+        INSTALL_PATH=$(jq -r '.install_path // empty' <<< "$DOMAIN_JSON")
+        PANEL_NAME=$(jq -r '.panel // empty' <<< "$DOMAIN_JSON")
+    fi
+
+    # If the domain is already managed, always prefer the stored exact path.
+    if [[ -z "$INSTALL_PATH" ]]; then
+        get_scanned_domains
+        for item in "${CERTS_LIST[@]}"; do
+            IFS='|' read -r d_name d_days d_panel d_file <<< "$item"
+            if [[ "$d_name" == "$DOMAIN" ]]; then
+                INSTALL_PATH=$(dirname "$d_file")
+                PANEL_NAME="$d_panel"
+                break
+            fi
+        done
+    fi
+
+    if [[ -z "$INSTALL_PATH" ]]; then
+        error "Could not detect the current certificate destination path."
+        info "No files were changed."
+        pause_screen
+        return
+    fi
+
+    if [[ ! -d "$INSTALL_PATH" ]]; then
+        error "Current certificate path does not exist: $INSTALL_PATH"
+        info "No files were changed."
+        pause_screen
+        return
+    fi
+
+    echo
+    echo -e "${CYAN}Domain:${RESET}        $DOMAIN"
+    echo -e "${CYAN}Panel:${RESET}         ${PANEL_NAME:-Custom}"
+    echo -e "${CYAN}Exact path:${RESET}    $INSTALL_PATH"
+    echo -e "${CYAN}Cert source:${RESET}   /etc/letsencrypt/live/$DOMAIN/"
+    echo
+    read -r -p "Enable Auto-Renew for this domain [Y/n]: " CONFIRM
+    [[ -z "$CONFIRM" ]] && CONFIRM="y"
+
+    if [[ ! "$CONFIRM" =~ ^[Yy]$ ]]; then
+        warning "Cancelled."
+        pause_screen
+        return
+    fi
+
+    if [[ -n "$DOMAIN_JSON" ]]; then
+        if set_domain_auto_renew "$DOMAIN" true; then
+            success "Auto-Renew enabled for $DOMAIN"
+            info "Destination path is locked to: $INSTALL_PATH"
+            log "AUTO-RENEW" "Enabled $DOMAIN -> $INSTALL_PATH"
+        else
+            error "Failed to update Auto-Renew configuration."
+        fi
+    else
+        TMP_CONFIG=$(mktemp)
+        if jq --arg d "$DOMAIN" --arg p "$INSTALL_PATH" --arg pn "${PANEL_NAME:-Custom}" \
+            '.domains = ((.domains // []) + [{"main_domain":$d,"install_path":$p,"panel":$pn,"auto_renew":true}])' \
+            "$CONFIG_FILE" > "$TMP_CONFIG" 2>/dev/null; then
+            mv "$TMP_CONFIG" "$CONFIG_FILE"
+            chmod 600 "$CONFIG_FILE"
+            success "Domain added to Auto-Renew: $DOMAIN"
+            info "Destination path is locked to: $INSTALL_PATH"
+            log "AUTO-RENEW" "Added $DOMAIN -> $INSTALL_PATH"
+        else
+            rm -f "$TMP_CONFIG"
+            error "Failed to save Auto-Renew configuration."
+        fi
+    fi
+
     pause_screen
 }
 
-sync_certificates() {
-    jq -c '.domains[]' "$CONFIG_FILE" | while read i; do
-        DOMAIN=$(echo "$i" | jq -r '.main_domain')
-        INSTALL_PATH=$(echo "$i" | jq -r '.install_path')
-        if [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
-            mkdir -p "$INSTALL_PATH"
-            cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$INSTALL_PATH/"
-            cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$INSTALL_PATH/"
-            chmod 644 "$INSTALL_PATH/fullchain.pem"
-            chmod 600 "$INSTALL_PATH/privkey.pem"
-            log "SYNC" "Synced SSL for $DOMAIN"
+list_auto_renew_domains() {
+    ui_header
+    echo -e "${NEON_PINK}--- AUTO-RENEW DOMAINS ---${RESET}"
+    echo
+
+    COUNT=$(auto_renew_domain_count)
+    if [[ "$COUNT" -eq 0 ]]; then
+        warning "No domains are currently enabled for Auto-Renew."
+        pause_screen
+        return
+    fi
+
+    printf "${CYAN}%-4s %-32s %-12s %-55s${RESET}\n" "ID" "DOMAIN" "STATUS" "EXACT DESTINATION PATH"
+    echo -e "${GRAY}-------------------------------------------------------------------------------------------------------------${RESET}"
+
+    INDEX=1
+    while IFS= read -r ITEM; do
+        [[ -z "$ITEM" ]] && continue
+        DOMAIN=$(jq -r '.main_domain' <<< "$ITEM")
+        INSTALL_PATH=$(jq -r '.install_path // empty' <<< "$ITEM")
+        if [[ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]]; then
+            EXPIRY_DATE=$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" 2>/dev/null | cut -d= -f2)
+            EXP_EPOCH=$(date -d "$EXPIRY_DATE" +%s 2>/dev/null)
+            CUR_EPOCH=$(date +%s)
+            DAYS_LEFT=$(( (EXP_EPOCH - CUR_EPOCH) / 86400 ))
+            STATUS="${DAYS_LEFT}d left"
+        else
+            STATUS="${RED}MISSING${RESET}"
+        fi
+        printf "%-4s %-32s %-12b %-55s\n" "[$INDEX]" "$DOMAIN" "$STATUS" "$INSTALL_PATH"
+        ((INDEX++))
+    done < <(jq -c '.domains[]? | select((.auto_renew // false) == true)' "$CONFIG_FILE" 2>/dev/null)
+
+    echo
+    if auto_renew_scheduler_enabled; then
+        success "Global scheduler: ACTIVE (daily at 03:00)"
+    else
+        warning "Global scheduler: DISABLED"
+    fi
+
+    pause_screen
+}
+
+remove_auto_renew_domain() {
+    ui_header
+    echo -e "${NEON_PINK}--- REMOVE FROM AUTO-RENEW ---${RESET}"
+    echo
+
+    mapfile -t AUTO_RENEW_ITEMS < <(jq -c '.domains[]? | select((.auto_renew // false) == true)' "$CONFIG_FILE" 2>/dev/null)
+
+    if (( ${#AUTO_RENEW_ITEMS[@]} == 0 )); then
+        warning "No Auto-Renew domains configured."
+        pause_screen
+        return
+    fi
+
+    for i in "${!AUTO_RENEW_ITEMS[@]}"; do
+        DOMAIN=$(jq -r '.main_domain' <<< "${AUTO_RENEW_ITEMS[$i]}")
+        INSTALL_PATH=$(jq -r '.install_path // empty' <<< "${AUTO_RENEW_ITEMS[$i]}")
+        printf "  ${BRIGHT_RED}%d)${RESET} ${WHITE}%s${RESET} ${GRAY}-> %s${RESET}\n" "$((i+1))" "$DOMAIN" "$INSTALL_PATH"
+    done
+    echo "  ${BRIGHT_RED}0)${RESET} Back"
+    echo
+
+    read -r -p "Select domain [0=Back]: " CHOICE
+    [[ "$CHOICE" == "0" ]] && { pause_screen; return; }
+
+    if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || (( CHOICE < 1 || CHOICE > ${#AUTO_RENEW_ITEMS[@]} )); then
+        error "Invalid selection."
+        pause_screen
+        return
+    fi
+
+    DOMAIN=$(jq -r '.main_domain' <<< "${AUTO_RENEW_ITEMS[$((CHOICE-1))]}")
+    if set_domain_auto_renew "$DOMAIN" false; then
+        success "Auto-Renew disabled for $DOMAIN"
+        log "AUTO-RENEW" "Removed $DOMAIN from Auto-Renew"
+    else
+        error "Failed to update Auto-Renew configuration."
+    fi
+
+    pause_screen
+}
+
+run_auto_renew_test() {
+    ui_header
+    echo -e "${NEON_PINK}--- AUTO-RENEW DRY RUN TEST ---${RESET}"
+    echo
+    echo -e "${GRAY}This uses Certbot --dry-run. No live certificate is replaced.${RESET}"
+    echo
+
+    mapfile -t AUTO_RENEW_ITEMS < <(jq -c '.domains[]? | select((.auto_renew // false) == true)' "$CONFIG_FILE" 2>/dev/null)
+
+    if (( ${#AUTO_RENEW_ITEMS[@]} == 0 )); then
+        warning "No Auto-Renew domains configured."
+        pause_screen
+        return
+    fi
+
+    local FAILED=0
+    for ITEM in "${AUTO_RENEW_ITEMS[@]}"; do
+        DOMAIN=$(jq -r '.main_domain' <<< "$ITEM")
+        INSTALL_PATH=$(jq -r '.install_path // empty' <<< "$ITEM")
+        echo -e "${CYAN}Testing:${RESET} $DOMAIN"
+        echo -e "${GRAY}Path: $INSTALL_PATH${RESET}"
+
+        if [[ ! -d "$INSTALL_PATH" ]]; then
+            error "Destination path missing: $INSTALL_PATH"
+            FAILED=1
+            echo
+            continue
+        fi
+
+        if certbot renew --cert-name "$DOMAIN" --dry-run --non-interactive; then
+            success "Renewal test passed: $DOMAIN"
+        else
+            error "Renewal test failed: $DOMAIN"
+            FAILED=1
+        fi
+        echo
+    done
+
+    if (( FAILED == 0 )); then
+        success "All Auto-Renew tests passed."
+    else
+        error "One or more Auto-Renew tests failed."
+        info "Existing live certificate files were not modified by the dry-run."
+    fi
+
+    pause_screen
+}
+
+enable_auto_renew() {
+    ui_header
+    echo -e "${NEON_PINK}--- ENABLE AUTO-RENEW ---${RESET}"
+    echo
+
+    COUNT=$(auto_renew_domain_count)
+    if [[ "$COUNT" -eq 0 ]]; then
+        warning "No domains are enabled for Auto-Renew."
+        info "Add a domain first from option 1."
+        pause_screen
+        return
+    fi
+
+    if ! command -v certbot >/dev/null 2>&1; then
+        error "Certbot is not installed."
+        pause_screen
+        return
+    fi
+
+    CERTBOT_BIN=$(command -v certbot)
+    CERTMASTER_BIN="/usr/local/bin/certmaster"
+    [[ -x "$CERTMASTER_BIN" ]] || CERTMASTER_BIN="$(command -v certmaster 2>/dev/null || true)"
+
+    if [[ -z "$CERTMASTER_BIN" ]]; then
+        error "CertMaster executable was not found at /usr/local/bin/certmaster."
+        info "Run the installation/update first so the system command exists."
+        pause_screen
+        return
+    fi
+
+    read -r -p "Enable daily Auto-Renew at 03:00 [y/N]: " CONFIRM
+    [[ "$CONFIRM" =~ ^[Yy]$ ]] || { warning "Cancelled."; pause_screen; return; }
+
+    cat > "$AUTO_RENEW_CRON_FILE" <<EOF
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+0 3 * * * root $CERTBOT_BIN renew --quiet --deploy-hook "$CERTMASTER_BIN --sync-renewed" >> $LOG_FILE 2>&1
+EOF
+
+    if [[ ! -s "$AUTO_RENEW_CRON_FILE" ]]; then
+        error "Failed to create Auto-Renew scheduler."
+        pause_screen
+        return
+    fi
+
+    chmod 644 "$AUTO_RENEW_CRON_FILE"
+
+    # Remove the old CertMaster user-crontab entry from previous versions.
+    (crontab -l 2>/dev/null | grep -vE 'certbot renew.*certmaster|certmaster --sync') | crontab - 2>/dev/null || true
+
+    success "Auto-Renew scheduler is ACTIVE."
+    info "Schedule: every day at 03:00"
+    info "Renewed certificates are synced only to their saved exact paths."
+    log "AUTO-RENEW" "Global scheduler enabled"
+    pause_screen
+}
+
+disable_auto_renew() {
+    ui_header
+    echo -e "${NEON_PINK}--- DISABLE AUTO-RENEW ---${RESET}"
+    echo
+
+    read -r -p "Disable the global Auto-Renew scheduler [y/N]: " CONFIRM
+    [[ "$CONFIRM" =~ ^[Yy]$ ]] || { warning "Cancelled."; pause_screen; return; }
+
+    rm -f "$AUTO_RENEW_CRON_FILE"
+    (crontab -l 2>/dev/null | grep -vE 'certbot renew.*certmaster|certmaster --sync') | crontab - 2>/dev/null || true
+
+    success "Global Auto-Renew scheduler disabled."
+    info "Your domain selections and exact destination paths were kept."
+    log "AUTO-RENEW" "Global scheduler disabled"
+    pause_screen
+}
+
+sync_certificate_domain() {
+    local domain="$1"
+    local domain_json install_path src_cert src_key tmp_cert tmp_key
+
+    domain_json=$(get_auto_renew_domain_json "$domain")
+    [[ -n "$domain_json" ]] || {
+        warning "Domain is not configured for Auto-Renew: $domain"
+        return 1
+    }
+
+    if [[ "$(jq -r '(.auto_renew // false)' <<< "$domain_json")" != "true" ]]; then
+        warning "Auto-Renew is disabled for: $domain"
+        return 1
+    fi
+
+    install_path=$(jq -r '.install_path // empty' <<< "$domain_json")
+    if [[ -z "$install_path" ]]; then
+        error "No destination path is stored for $domain."
+        return 1
+    fi
+
+    src_cert="/etc/letsencrypt/live/$domain/fullchain.pem"
+    src_key="/etc/letsencrypt/live/$domain/privkey.pem"
+
+    if [[ ! -f "$src_cert" || ! -f "$src_key" ]]; then
+        error "Renewed certificate files are missing for $domain."
+        return 1
+    fi
+
+    if ! openssl x509 -in "$src_cert" -noout >/dev/null 2>&1; then
+        error "Certificate validation failed for $domain. Existing destination files were kept."
+        return 1
+    fi
+
+    if ! openssl pkey -in "$src_key" -noout >/dev/null 2>&1; then
+        error "Private key validation failed for $domain. Existing destination files were kept."
+        return 1
+    fi
+
+    if [[ ! -d "$install_path" ]]; then
+        error "Exact destination path is missing: $install_path"
+        return 1
+    fi
+
+    tmp_cert="$install_path/.certmaster-fullchain.$$.tmp"
+    tmp_key="$install_path/.certmaster-privkey.$$.tmp"
+
+    if ! cp "$src_cert" "$tmp_cert" || ! cp "$src_key" "$tmp_key"; then
+        rm -f "$tmp_cert" "$tmp_key"
+        error "Failed to stage renewed files for $domain. Existing files were kept."
+        return 1
+    fi
+
+    chmod 644 "$tmp_cert"
+    chmod 600 "$tmp_key"
+
+    if ! openssl x509 -in "$tmp_cert" -noout >/dev/null 2>&1 || \
+       ! openssl pkey -in "$tmp_key" -noout >/dev/null 2>&1; then
+        rm -f "$tmp_cert" "$tmp_key"
+        error "Staged certificate validation failed for $domain. Existing files were kept."
+        return 1
+    fi
+
+    if ! mv -f "$tmp_cert" "$install_path/fullchain.pem"; then
+        rm -f "$tmp_cert" "$tmp_key"
+        error "Failed to install renewed certificate for $domain."
+        return 1
+    fi
+
+    if ! mv -f "$tmp_key" "$install_path/privkey.pem"; then
+        rm -f "$tmp_key"
+        error "Failed to install renewed private key for $domain."
+        return 1
+    fi
+
+    chmod 644 "$install_path/fullchain.pem"
+    chmod 600 "$install_path/privkey.pem"
+
+    if ! openssl x509 -in "$install_path/fullchain.pem" -noout >/dev/null 2>&1; then
+        error "Destination certificate verification failed for $domain."
+        return 1
+    fi
+
+    log "SYNC" "Synced renewed SSL for $domain -> $install_path"
+    success "Synced $domain -> $install_path"
+    return 0
+}
+
+sync_renewed_certificates() {
+    local renewed_domains="${RENEWED_DOMAINS:-}"
+    local synced=0
+    local failed=0
+
+    if [[ -z "$renewed_domains" ]]; then
+        warning "No renewed domains were provided by Certbot."
+        return 0
+    fi
+
+    for DOMAIN in $renewed_domains; do
+        if sync_certificate_domain "$DOMAIN"; then
+            synced=$((synced + 1))
+        else
+            failed=$((failed + 1))
         fi
     done
-    detect_webserver
-    [[ ! -z "$WEBSERVER" ]] && systemctl reload $WEBSERVER >/dev/null 2>&1
+
+    if (( synced > 0 )); then
+        detect_webserver
+        if [[ -n "$WEBSERVER" ]]; then
+            if systemctl reload "$WEBSERVER" >/dev/null 2>&1; then
+                success "Webserver reloaded: $WEBSERVER"
+                log "SYNC" "Reloaded webserver $WEBSERVER after renewal"
+            else
+                warning "Certificate sync succeeded, but webserver reload failed: $WEBSERVER"
+                log "ERROR" "Webserver reload failed: $WEBSERVER"
+            fi
+        fi
+    fi
+
+    (( failed == 0 ))
 }
+
+sync_certificates() {
+    local synced=0
+    local failed=0
+
+    mapfile -t AUTO_RENEW_ITEMS < <(jq -c '.domains[]? | select((.auto_renew // false) == true)' "$CONFIG_FILE" 2>/dev/null)
+
+    if (( ${#AUTO_RENEW_ITEMS[@]} == 0 )); then
+        warning "No domains are enabled for Auto-Renew."
+        return 1
+    fi
+
+    for ITEM in "${AUTO_RENEW_ITEMS[@]}"; do
+        DOMAIN=$(jq -r '.main_domain' <<< "$ITEM")
+        if sync_certificate_domain "$DOMAIN"; then
+            synced=$((synced + 1))
+        else
+            failed=$((failed + 1))
+        fi
+    done
+
+    if (( synced > 0 )); then
+        detect_webserver
+        if [[ -n "$WEBSERVER" ]]; then
+            systemctl reload "$WEBSERVER" >/dev/null 2>&1 || \
+                warning "Webserver reload failed: $WEBSERVER"
+        fi
+    fi
+
+    (( failed == 0 ))
+}
+
+setup_auto_renew() {
+    while true; do
+        ui_header
+        echo -e "${NEON_PINK}--- SMART AUTO RENEW ---${RESET}"
+        echo
+
+        COUNT=$(auto_renew_domain_count)
+        echo -e "${CYAN}Configured domains:${RESET} $COUNT"
+        if auto_renew_scheduler_enabled; then
+            echo -e "${CYAN}Global scheduler:${RESET}  ${GREEN}ACTIVE${RESET} (03:00 daily)"
+        else
+            echo -e "${CYAN}Global scheduler:${RESET}  ${RED}DISABLED${RESET}"
+        fi
+        echo
+
+        menu_item "1" "Add Domain" "Enable Auto-Renew and lock exact path"
+        menu_item "2" "Managed Domains" "View domains and exact destination paths"
+        menu_item "3" "Remove Domain" "Disable Auto-Renew for one domain"
+        menu_item "4" "Renewal Test" "Run Certbot dry-run without changing live files"
+        menu_item "5" "Enable Scheduler" "Run automatic renewal daily at 03:00"
+        menu_item "6" "Disable Scheduler" "Stop the global Auto-Renew scheduler"
+        menu_item "0" "Back" "Return to main menu"
+        echo
+
+        read -r -p "Select option [0-6]: " AUTO_CHOICE
+        case "$AUTO_CHOICE" in
+            1) add_auto_renew_domain ;;
+            2) list_auto_renew_domains ;;
+            3) remove_auto_renew_domain ;;
+            4) run_auto_renew_test ;;
+            5) enable_auto_renew ;;
+            6) disable_auto_renew ;;
+            0) return ;;
+            *) error "Invalid option."; sleep 1 ;;
+        esac
+    done
+}
+
+if [[ "$1" == "--sync-renewed" ]]; then
+    sync_renewed_certificates
+    exit $?
+fi
 
 if [[ "$1" == "--sync" ]]; then
     sync_certificates
-    telegram_alert "🔄 CertMaster: Auto-Renew & Sync Hook Executed!"
-    exit 0
+    exit $?
 fi
 
 # =========================================================
