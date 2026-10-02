@@ -193,6 +193,32 @@ pause_screen() {
     read -r -p "  Press ENTER to return to the main menu... "
 }
 
+
+certificate_progress() {
+    local pid="$1"
+    local domain="$2"
+    local width=34
+    local percent=5
+    local filled empty
+
+    echo
+    echo -e "  ${MAGENTA}◆${RESET} ${WHITE}Issuing certificate:${RESET} ${CYAN}${domain}${RESET}"
+
+    while kill -0 "$pid" 2>/dev/null; do
+        filled=$((percent * width / 100))
+        empty=$((width - filled))
+        printf "\r  ${BRIGHT_RED}["
+        (( filled > 0 )) && printf '%*s' "$filled" '' | tr ' ' '█'
+        (( empty > 0 )) && printf '%*s' "$empty" '' | tr ' ' '░'
+        printf "] ${CYAN}%3d%%${RESET}" "$percent"
+        if (( percent < 90 )); then percent=$((percent + 2)); fi
+        sleep 0.12
+    done
+    printf "\r  ${BRIGHT_RED}["
+    printf '%*s' "$width" '' | tr ' ' '█'
+    printf "] ${GREEN}100%%${RESET}\n"
+}
+
 progress_bar() {
     local duration="$1" title="$2" i percent filled empty
     echo -e "  ${MAGENTA}◆${RESET} ${WHITE}${title}${RESET}"
@@ -460,37 +486,43 @@ install_certificate() {
 
     for DOMAIN in "${DOMAINS[@]}"; do
         CURRENT_INDEX=$((SUCCESS_COUNT + FAILED_COUNT + 1))
+
         echo
-        echo -e "${WHITE}${BOLD}[${CURRENT_INDEX}/${#DOMAINS[@]}] ${DOMAIN}${RESET}"
+        echo -e "${DARK_GRAY}────────────────────────────────────────────────────────────${RESET}"
+        echo -e "${BRIGHT_RED}[${CURRENT_INDEX}/${#DOMAINS[@]}]${RESET} ${WHITE}${BOLD}${DOMAIN}${RESET}"
+        echo -e "${GRAY}Issuing independent SSL certificate...${RESET}"
 
         case $challenge_choice in
             2)
-                certbot certonly \
-                    --dns-cloudflare \
+                certbot certonly --dns-cloudflare \
                     --dns-cloudflare-credentials /root/.secrets/cloudflare.ini \
-                    -d "$DOMAIN" \
-                    --non-interactive --agree-tos \
-                    --register-unsafely-without-email >/dev/null 2>&1
+                    -d "$DOMAIN" --non-interactive --agree-tos \
+                    --register-unsafely-without-email >/tmp/certmaster-certbot.log 2>&1 &
                 ;;
             3)
-                certbot certonly \
-                    --webroot -w "$WEBROOT_PATH" \
-                    -d "$DOMAIN" \
-                    --non-interactive --agree-tos \
-                    --register-unsafely-without-email >/dev/null 2>&1
+                certbot certonly --webroot -w "$WEBROOT_PATH" \
+                    -d "$DOMAIN" --non-interactive --agree-tos \
+                    --register-unsafely-without-email >/tmp/certmaster-certbot.log 2>&1 &
                 ;;
             4)
-                certbot certonly \
-                    --standalone \
-                    -d "$DOMAIN" \
+                certbot certonly --standalone -d "$DOMAIN" \
                     --non-interactive --agree-tos \
-                    --register-unsafely-without-email >/dev/null 2>&1
+                    --register-unsafely-without-email >/tmp/certmaster-certbot.log 2>&1 &
+                ;;
+            *)
+                error "Invalid certificate validation method."
+                ((FAILED_COUNT++))
+                RESULTS+=("FAIL|$DOMAIN|")
+                continue
                 ;;
         esac
 
+        CERTBOT_PID=$!
+        certificate_progress "$CERTBOT_PID" "$DOMAIN"
+        wait "$CERTBOT_PID"
         CERTBOT_STATUS=$?
 
-        if [[ $CERTBOT_STATUS -eq 0 && -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" && -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]]; then
+        if [[ $CERTBOT_STATUS -eq 0 ]] && [[ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]] && [[ -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]]; then
             FINAL_PATH="$TARGET_BASE_DIR/$DOMAIN"
             mkdir -p "$FINAL_PATH"
             cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$FINAL_PATH/fullchain.pem"
@@ -501,16 +533,27 @@ install_certificate() {
             TMP=$(jq --arg d "$DOMAIN" --arg p "$FINAL_PATH" --arg pn "$PANEL_NAME" \
                 '.domains = (.domains // []) + [{"main_domain":$d,"install_path":$p,"panel":$pn}]' \
                 "$CONFIG_FILE" 2>/dev/null)
-            [[ -n "$TMP" ]] && echo "$TMP" > "$CONFIG_FILE"
+            if [[ -n "$TMP" && "$TMP" != "null" ]]; then
+                echo "$TMP" > "$CONFIG_FILE"
+                chmod 600 "$CONFIG_FILE"
+            fi
 
             ((SUCCESS_COUNT++))
             RESULTS+=("OK|$DOMAIN|$FINAL_PATH")
-            success "SSL installed: $DOMAIN"
+            echo
+            success "SSL installed successfully: $DOMAIN"
+            echo -e "  ${GRAY}Certificate:${RESET} ${WHITE}${FINAL_PATH}/fullchain.pem${RESET}"
+            echo -e "  ${GRAY}Private key:${RESET} ${WHITE}${FINAL_PATH}/privkey.pem${RESET}"
+            log "SUCCESS" "Installed SSL for $DOMAIN | Panel: $PANEL_NAME"
         else
             ((FAILED_COUNT++))
             RESULTS+=("FAIL|$DOMAIN|")
-            error "SSL failed: $DOMAIN"
+            echo
+            error "SSL installation failed: $DOMAIN"
+            echo -e "  ${GRAY}Certbot log:${RESET} ${WHITE}/tmp/certmaster-certbot.log${RESET}"
+            log "ERROR" "SSL failed for $DOMAIN | Panel: $PANEL_NAME"
         fi
+        echo -e "${DARK_GRAY}────────────────────────────────────────────────────────────${RESET}"
     done
 
     if [[ -n "$STOPPED_WEBSERVER" ]]; then
