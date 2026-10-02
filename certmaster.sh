@@ -801,13 +801,15 @@ delete_certificate() {
             return
         fi
 
-        printf "${CYAN}%-4s %-65s %-15s${RESET}\n" "ID" "DOMAIN TO DELETE" "DETECTED IN"
+        printf "${CYAN}%-4s %-65s %-15s${RESET}
+" "ID" "DOMAIN TO DELETE" "DETECTED IN"
         echo -e "${GRAY}-----------------------------------------------------------------------------------------${RESET}"
 
         INDEX=1
         for item in "${CERTS_LIST[@]}"; do
             IFS='|' read -r d_name d_days d_panel d_file <<< "$item"
-            printf "%-4s %-65s %-15s\n" "[$INDEX]" "$d_name" "$d_panel"
+            printf "%-4s %-65s %-15s
+" "[$INDEX]" "$d_name" "$d_panel"
             ((INDEX++))
         done
 
@@ -816,12 +818,10 @@ delete_certificate() {
         echo
         read -r -p "Certificate ID [0=Back]: " CHOICE
 
-        # 0 from Delete Certificates -> Main Menu
         if [[ "$CHOICE" == "0" ]]; then
             return
         fi
 
-        # Invalid selection -> stay in Delete Certificates
         if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || \
            [ "$CHOICE" -lt 1 ] || \
            [ "$CHOICE" -gt ${#CERTS_LIST[@]} ]; then
@@ -867,15 +867,18 @@ delete_certificate() {
 
             success "Domain $d_name completely removed from the server."
             log "DELETE" "Wiped domain $d_name"
+
             echo
             info "Returning to Delete Certificates list..."
             sleep 1
-            # IMPORTANT: continue the SAME delete menu, not main menu.
+
+            # بسیار مهم:
+            # فقط لیست Delete دوباره نمایش داده می‌شود.
+            # هیچ pause_screen یا return اینجا وجود ندارد.
             continue
         else
             info "Deletion cancelled."
             sleep 1
-            # Stay in Delete Certificates list.
             continue
         fi
     done
