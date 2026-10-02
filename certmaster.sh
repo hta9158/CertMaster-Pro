@@ -6,7 +6,7 @@
 #                 (Modern CLI Edition)
 # =========================================================
 
-VERSION="1.0.2 CLI"
+VERSION="0.0.2 CLI"
 
 # =========================================================
 # PATHS
@@ -247,97 +247,268 @@ telegram_alert() {
 # =========================================================
 install_certificate() {
     ui_header
-    echo -e "${NEON_PINK}--- SELECT TARGET PANEL ---${RESET}"
-    echo -e " ${CYAN}1)${RESET} Rebecca"
-    echo -e " ${CYAN}2)${RESET} Marzban"
-    echo -e " ${CYAN}3)${RESET} Pasarguard"
-    echo -e " ${CYAN}4)${RESET} Marzneshin"
-    echo -e " ${CYAN}5)${RESET} Custom Path"
+    section_title "INSTALL SSL" "Select a panel, enter multiple domains, then issue one separate SSL certificate per domain."
+
+    echo -e "  ${CYAN}1)${RESET} ${WHITE}${BOLD}Pasarguard${RESET}  ${GRAY}/var/lib/pasarguard/certs${RESET}"
+    echo -e "  ${CYAN}2)${RESET} ${WHITE}${BOLD}Marzban${RESET}     ${GRAY}/var/lib/marzban/certs${RESET}"
+    echo -e "  ${CYAN}3)${RESET} ${WHITE}${BOLD}Rebecca${RESET}     ${GRAY}/var/lib/rebecca/certs${RESET}"
+    echo -e "  ${CYAN}4)${RESET} ${WHITE}${BOLD}Custom${RESET}      ${GRAY}Custom certificate directory${RESET}"
     echo
-    read -r -p "Select panel [1-5]: " panel_choice
+    read -r -p "Select panel [1-4]: " panel_choice
 
     case $panel_choice in
-        1) TARGET_BASE_DIR="/var/lib/rebecca/certs"; PANEL_NAME="Rebecca" ;;
-        2) TARGET_BASE_DIR="/var/lib/marzban/certs"; PANEL_NAME="Marzban" ;;
-        3) TARGET_BASE_DIR="/var/lib/pasarguard/certs"; PANEL_NAME="Pasarguard" ;;
-        4) TARGET_BASE_DIR="/var/lib/marzneshin/certs"; PANEL_NAME="Marzneshin" ;;
-        5) read -r -p "Custom absolute path: " TARGET_BASE_DIR; PANEL_NAME="Custom" ;;
-        *) error "Invalid choice."; pause_screen; return ;;
+        1)
+            TARGET_BASE_DIR="/var/lib/pasarguard/certs"
+            PANEL_NAME="Pasarguard"
+            ;;
+        2)
+            TARGET_BASE_DIR="/var/lib/marzban/certs"
+            PANEL_NAME="Marzban"
+            ;;
+        3)
+            TARGET_BASE_DIR="/var/lib/rebecca/certs"
+            PANEL_NAME="Rebecca"
+            ;;
+        4)
+            read -r -p "Custom absolute path: " TARGET_BASE_DIR
+            [[ -z "$TARGET_BASE_DIR" || "$TARGET_BASE_DIR" != /* ]] && {
+                error "Custom path must be an absolute path."
+                pause_screen
+                return
+            }
+            PANEL_NAME="Custom"
+            ;;
+        *)
+            error "Invalid panel choice."
+            pause_screen
+            return
+            ;;
     esac
 
     echo
-    read -r -p "Domain name: " DOMAIN
-    [[ -z "$DOMAIN" ]] && return
+    success "Selected panel: ${PANEL_NAME}"
+    info "Certificate base path: ${TARGET_BASE_DIR}"
+    echo
+
+    # -----------------------------------------------------
+    # MULTI-DOMAIN INPUT
+    # Each domain is processed independently and receives
+    # its own Let's Encrypt certificate and target directory.
+    # -----------------------------------------------------
+    echo -e "${WHITE}${BOLD}DOMAIN LIST${RESET}"
+    echo -e "${GRAY}Enter one domain per line. Type DONE when finished.${RESET}"
+    echo -e "${GRAY}Example: panel.example.com${RESET}"
+    echo
+
+    DOMAINS=()
+    while true; do
+        read -r -p "Domain $(( ${#DOMAINS[@]} + 1 )) [DONE to finish]: " DOMAIN_INPUT
+
+        [[ "${DOMAIN_INPUT^^}" == "DONE" ]] && break
+        [[ -z "$DOMAIN_INPUT" ]] && continue
+
+        # Accept comma/space separated input as a convenience, while
+        # still issuing a separate certificate for every domain.
+        DOMAIN_INPUT=${DOMAIN_INPUT//,/ }
+        read -ra INPUT_DOMAINS <<< "$DOMAIN_INPUT"
+
+        for DOMAIN in "${INPUT_DOMAINS[@]}"; do
+            DOMAIN="${DOMAIN#https://}"
+            DOMAIN="${DOMAIN#http://}"
+            DOMAIN="${DOMAIN%%/*}"
+            [[ -z "$DOMAIN" ]] && continue
+
+            if [[ "$DOMAIN" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+                if [[ ! " ${DOMAINS[*]} " =~ " $DOMAIN " ]]; then
+                    DOMAINS+=("$DOMAIN")
+                    success "Added: $DOMAIN"
+                else
+                    warning "Already added: $DOMAIN"
+                fi
+            else
+                warning "Invalid domain skipped: $DOMAIN"
+            fi
+        done
+    done
+
+    if (( ${#DOMAINS[@]} == 0 )); then
+        warning "No domains were entered."
+        pause_screen
+        return
+    fi
 
     echo
-    echo -e "${NEON_PINK}--- SELECT CHALLENGE METHOD ---${RESET}"
-    echo -e " ${CYAN}1)${RESET} Webroot (No Downtime - Nginx/Apache)"
-    echo -e " ${CYAN}2)${RESET} Cloudflare DNS (No Downtime)"
-    echo -e " ${CYAN}3)${RESET} Standalone (Requires Port 80)"
+    echo -e "${WHITE}${BOLD}SELECTED DOMAINS${RESET}"
+    for i in "${!DOMAINS[@]}"; do
+        printf "  ${BRIGHT_RED}%2d)${RESET} ${WHITE}%s${RESET}\n" "$((i+1))" "${DOMAINS[$i]}"
+    done
+    echo
+
+    # -----------------------------------------------------
+    # CHALLENGE METHOD
+    # One method is selected for the batch, but each domain
+    # gets its own independent certbot request.
+    # -----------------------------------------------------
+    echo -e "${NEON_PINK}CHALLENGE METHOD${RESET}"
+    echo -e "  ${CYAN}1)${RESET} ${WHITE}Webroot${RESET}     ${GRAY}No downtime - Nginx/Apache${RESET}"
+    echo -e "  ${CYAN}2)${RESET} ${WHITE}Cloudflare DNS${RESET} ${GRAY}No downtime - DNS challenge${RESET}"
+    echo -e "  ${CYAN}3)${RESET} ${WHITE}Standalone${RESET}   ${GRAY}Requires port 80${RESET}"
     echo
     read -r -p "Challenge method [1-3]: " challenge_choice
 
+    WEBROOT_PATH=""
+    STOPPED_WEBSERVER=""
+    CF_EMAIL=""
+    CF_KEY=""
+
     case $challenge_choice in
         1)
-            read -p "➜ Enter webroot path [/var/www/html]: " WEBROOT_PATH
+            read -r -p "Webroot path [/var/www/html]: " WEBROOT_PATH
             WEBROOT_PATH=${WEBROOT_PATH:-/var/www/html}
-            CERT_CMD="certbot certonly --webroot -w $WEBROOT_PATH -d $DOMAIN --non-interactive --agree-tos --register-unsafely-without-email"
             ;;
         2)
-            CF_EMAIL=$(jq -r '.cloudflare_email' "$CONFIG_FILE")
-            CF_KEY=$(jq -r '.cloudflare_api_key' "$CONFIG_FILE")
-            if [[ -z "$CF_EMAIL" || "$CF_EMAIL" == "null" ]]; then
+            CF_EMAIL=$(jq -r '.cloudflare_email' "$CONFIG_FILE" 2>/dev/null)
+            CF_KEY=$(jq -r '.cloudflare_api_key' "$CONFIG_FILE" 2>/dev/null)
+
+            if [[ -z "$CF_EMAIL" || "$CF_EMAIL" == "null" || -z "$CF_KEY" || "$CF_KEY" == "null" ]]; then
                 read -r -p "Cloudflare Email: " CF_EMAIL
                 read -r -p "Cloudflare API Key: " CF_KEY
                 TMP=$(jq --arg e "$CF_EMAIL" --arg k "$CF_KEY" '.cloudflare_email=$e | .cloudflare_api_key=$k' "$CONFIG_FILE")
                 echo "$TMP" > "$CONFIG_FILE"
             fi
-            mkdir -p ~/.secrets
-            echo -e "dns_cloudflare_email = $CF_EMAIL\ndns_cloudflare_api_key = $CF_KEY" > ~/.secrets/cloudflare.ini
-            chmod 600 ~/.secrets/cloudflare.ini
-            CERT_CMD="certbot certonly --dns-cloudflare --dns-cloudflare-credentials ~/.secrets/cloudflare.ini -d $DOMAIN --non-interactive --agree-tos --register-unsafely-without-email"
+
+            mkdir -p /root/.secrets
+            printf 'dns_cloudflare_email = %s\ndns_cloudflare_api_key = %s\n' "$CF_EMAIL" "$CF_KEY" > /root/.secrets/cloudflare.ini
+            chmod 600 /root/.secrets/cloudflare.ini
             ;;
         3)
-            if lsof -Pi :80 -sTCP:LISTEN -t >/dev/null ; then
-                warning "Port 80 is in use!"
-                read -r -p "Stop webserver temporarily? [y/N]: " stop_web
-                if [[ "$stop_web" =~ ^[Yy]$ ]]; then
-                    detect_webserver
-                    [[ ! -z "$WEBSERVER" ]] && systemctl stop $WEBSERVER
+            if lsof -Pi :80 -sTCP:LISTEN -t >/dev/null 2>&1; then
+                detect_webserver
+                if [[ -n "$WEBSERVER" ]]; then
+                    warning "Port 80 is currently used by ${WEBSERVER}."
+                    read -r -p "Stop ${WEBSERVER} temporarily for the batch? [y/N]: " stop_web
+                    if [[ "$stop_web" =~ ^[Yy]$ ]]; then
+                        systemctl stop "$WEBSERVER"
+                        STOPPED_WEBSERVER="$WEBSERVER"
+                    else
+                        error "Operation aborted."
+                        pause_screen
+                        return
+                    fi
                 else
-                    error "Operation aborted."; pause_screen; return
+                    error "Port 80 is already in use by another service."
+                    pause_screen
+                    return
                 fi
             fi
-            CERT_CMD="certbot certonly --standalone -d $DOMAIN --non-interactive --agree-tos --register-unsafely-without-email"
             ;;
-        *) error "Invalid choice."; pause_screen; return ;;
+        *)
+            error "Invalid challenge method."
+            pause_screen
+            return
+            ;;
     esac
 
     echo
-    progress_bar 20 "Requesting Certificate for $DOMAIN..."
-    $CERT_CMD >/dev/null 2>&1
+    section_title "ISSUING CERTIFICATES" "Every domain is processed separately."
 
-    if [ $? -eq 0 ]; then
-        FINAL_PATH="$TARGET_BASE_DIR/$DOMAIN"
-        mkdir -p "$FINAL_PATH"
-        cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$FINAL_PATH/"
-        cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$FINAL_PATH/"
-        chmod 644 "$FINAL_PATH/fullchain.pem"
-        chmod 600 "$FINAL_PATH/privkey.pem"
+    SUCCESS_COUNT=0
+    FAILED_COUNT=0
+    RESULTS=()
 
-        TMP=$(jq --arg d "$DOMAIN" --arg p "$FINAL_PATH" --arg pn "$PANEL_NAME" '.domains += [{"main_domain":$d, "install_path":$p, "panel":$pn}]' "$CONFIG_FILE")
-        echo "$TMP" > "$CONFIG_FILE"
+    for DOMAIN in "${DOMAINS[@]}"; do
+        echo
+        echo -e "${WHITE}${BOLD}[$((SUCCESS_COUNT + FAILED_COUNT + 1))/${#DOMAINS[@]}] ${DOMAIN}${RESET}"
 
-        success "Certificate successfully installed to $PANEL_NAME!"
-        log "SUCCESS" "Installed SSL for $DOMAIN"
-        telegram_alert "✅ SSL Installed\nDomain: $DOMAIN\nPanel: $PANEL_NAME"
-    else
-        error "Failed to generate certificate. Please check certbot logs."
-        log "ERROR" "SSL failed for $DOMAIN"
+        case $challenge_choice in
+            1)
+                certbot certonly \
+                    --webroot -w "$WEBROOT_PATH" \
+                    -d "$DOMAIN" \
+                    --non-interactive --agree-tos \
+                    --register-unsafely-without-email >/dev/null 2>&1
+                ;;
+            2)
+                certbot certonly \
+                    --dns-cloudflare \
+                    --dns-cloudflare-credentials /root/.secrets/cloudflare.ini \
+                    -d "$DOMAIN" \
+                    --non-interactive --agree-tos \
+                    --register-unsafely-without-email >/dev/null 2>&1
+                ;;
+            3)
+                certbot certonly \
+                    --standalone \
+                    -d "$DOMAIN" \
+                    --non-interactive --agree-tos \
+                    --register-unsafely-without-email >/dev/null 2>&1
+                ;;
+        esac
+
+        CERTBOT_STATUS=$?
+
+        if [[ $CERTBOT_STATUS -eq 0 && -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" && -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]]; then
+            FINAL_PATH="$TARGET_BASE_DIR/$DOMAIN"
+            mkdir -p "$FINAL_PATH"
+            cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$FINAL_PATH/fullchain.pem"
+            cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$FINAL_PATH/privkey.pem"
+            chmod 644 "$FINAL_PATH/fullchain.pem"
+            chmod 600 "$FINAL_PATH/privkey.pem"
+
+            TMP=$(jq --arg d "$DOMAIN" --arg p "$FINAL_PATH" --arg pn "$PANEL_NAME" \
+                '.domains = ((.domains // []) | map(select(.main_domain != $d)) + [{"main_domain":$d,"install_path":$p,"panel":$pn}])' \
+                "$CONFIG_FILE" 2>/dev/null)
+            [[ -n "$TMP" ]] && echo "$TMP" > "$CONFIG_FILE"
+
+            SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+            RESULTS+=("SUCCESS|$DOMAIN|$PANEL_NAME|$FINAL_PATH")
+            success "SSL installed successfully: $DOMAIN"
+            info "Panel: $PANEL_NAME"
+            info "Certificate: $FINAL_PATH/fullchain.pem"
+            info "Private key: $FINAL_PATH/privkey.pem"
+            log "SUCCESS" "Installed SSL for $DOMAIN on $PANEL_NAME"
+            telegram_alert "✅ SSL Installed\nDomain: $DOMAIN\nPanel: $PANEL_NAME\nPath: $FINAL_PATH"
+        else
+            FAILED_COUNT=$((FAILED_COUNT + 1))
+            RESULTS+=("FAILED|$DOMAIN|$PANEL_NAME|-")
+            error "SSL request failed: $DOMAIN"
+            error "No certificate was copied for this domain."
+            log "ERROR" "SSL failed for $DOMAIN"
+        fi
+    done
+
+    if [[ -n "$STOPPED_WEBSERVER" ]]; then
+        systemctl start "$STOPPED_WEBSERVER"
     fi
 
-    detect_webserver
-    [[ ! -z "$WEBSERVER" && "$challenge_choice" == "3" ]] && systemctl start $WEBSERVER
+    echo
+    section_title "INSTALLATION COMPLETE" "Certificate results and paths"
+
+    printf "  ${GRAY}Panel:${RESET} ${WHITE}${PANEL_NAME}${RESET}\n"
+    printf "  ${GRAY}Base path:${RESET} ${CYAN}${TARGET_BASE_DIR}${RESET}\n"
+    printf "  ${GREEN}Successful:${RESET} ${WHITE}%d${RESET}    ${RED}Failed:${RESET} ${WHITE}%d${RESET}\n" "$SUCCESS_COUNT" "$FAILED_COUNT"
+    echo
+
+    for RESULT in "${RESULTS[@]}"; do
+        IFS='|' read -r STATUS DOMAIN PANEL PATH <<< "$RESULT"
+        if [[ "$STATUS" == "SUCCESS" ]]; then
+            echo -e "  ${GREEN}●${RESET} ${WHITE}${DOMAIN}${RESET}"
+            echo -e "      ${GRAY}Panel:${RESET} ${PANEL}"
+            echo -e "      ${GRAY}Cert:${RESET}  ${CYAN}${PATH}/fullchain.pem${RESET}"
+            echo -e "      ${GRAY}Key:${RESET}   ${CYAN}${PATH}/privkey.pem${RESET}"
+        else
+            echo -e "  ${RED}●${RESET} ${WHITE}${DOMAIN}${RESET} ${RED}FAILED${RESET}"
+        fi
+        echo
+    done
+
+    if (( FAILED_COUNT == 0 )); then
+        success "All requested domains were completed successfully."
+    else
+        warning "Batch finished with ${FAILED_COUNT} failed domain(s)."
+    fi
+
+    echo
     pause_screen
 }
 
