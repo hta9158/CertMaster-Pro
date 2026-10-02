@@ -795,50 +795,126 @@ get_scanned_domains() {
 # 3. LIST CERTIFICATES
 # =========================================================
 list_certificates() {
-    ui_header
-    echo -e "${NEON_PINK}--- MANAGED CERTIFICATES ---${RESET}"
-    echo
-    
-    get_scanned_domains
-
-    if [ ${#CERTS_LIST[@]} -eq 0 ]; then
-        warning "No valid SSL certificates found on the server."
-        pause_screen
-        return
-    fi
-
-    printf "${CYAN}%-4s %-65s %-15s %-10s %-8s${RESET}\n" "ID" "DOMAIN" "PANEL" "DAYS LEFT" "GRADE"
-    echo -e "${GRAY}-------------------------------------------------------------------------------------------------------------${RESET}"
-
-    INDEX=1
-    for item in "${CERTS_LIST[@]}"; do
-        IFS='|' read -r d_name d_days d_panel d_file <<< "$item"
-        GRADE=$(ssl_grade "$d_days")
-        printf "%-4s %-65s %-15s %-10s %-8b\n" "[$INDEX]" "$d_name" "$d_panel" "$d_days" "$GRADE"
-        ((INDEX++))
-    done
-
-    echo
-    echo -e "${GRAY}0) Return to Main Menu${RESET}"
-    echo
-    read -r -p "Select ID [0=Back]: " CHOICE
-
-    if [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -gt 0 ] && [ "$CHOICE" -le ${#CERTS_LIST[@]} ]; then
-        SELECTED_INDEX=$((CHOICE - 1))
-        IFS='|' read -r d_name d_days d_panel d_file <<< "${CERTS_LIST[$SELECTED_INDEX]}"
-        
-        CERT_DIR=$(dirname "$d_file")
-        
+    while true; do
         ui_header
-        echo -e "${NEON_PINK}--- CERTIFICATE DETAILS ---${RESET}"
-        echo -e "${CYAN}🌐 Domain:${RESET}       $d_name"
-        echo -e "${CYAN}📦 Active Panel:${RESET} $d_panel"
-        echo -e "${CYAN}📂 Cert File:${RESET}    $CERT_DIR/fullchain.pem"
-        echo -e "${CYAN}🔑 Private Key:${RESET}  $CERT_DIR/privkey.pem"
-        echo -e "${CYAN}⏳ Days Left:${RESET}    $d_days days"
-        echo -e "${CYAN}🏆 SSL Grade:${RESET}    $(ssl_grade "$d_days")"
-    fi
-    pause_screen
+        section_title "MANAGED CERTIFICATES" "Inspect, list and manage your SSL certificates."
+
+        get_scanned_domains
+
+        if [ ${#CERTS_LIST[@]} -eq 0 ]; then
+            warning "No valid SSL certificates found on the server."
+            echo
+            echo -e "  ${BRIGHT_RED}0)${RESET} ${GRAY}Back to main menu${RESET}"
+            echo
+            read -r -p "Select option [0]: " EMPTY_CHOICE
+            return
+        fi
+
+        printf "  ${CYAN}%-4s %-45s %-16s %-12s %-8s${RESET}\n" \
+            "ID" "DOMAIN" "PANEL" "DAYS LEFT" "GRADE"
+
+        echo -e "  ${DARK_GRAY}$(repeat_char '─' 92)${RESET}"
+
+        INDEX=1
+
+        for item in "${CERTS_LIST[@]}"; do
+            IFS='|' read -r d_name d_days d_panel d_file <<< "$item"
+
+            GRADE=$(ssl_grade "$d_days")
+
+            printf "  ${BRIGHT_RED}%-4s${RESET} %-45s %-16s %-12s %-8b\n" \
+                "[$INDEX]" \
+                "$d_name" \
+                "$d_panel" \
+                "$d_days" \
+                "$GRADE"
+
+            ((INDEX++))
+        done
+
+        echo
+        echo -e "  ${BRIGHT_RED}0)${RESET} ${GRAY}Back to main menu${RESET}"
+        echo
+
+        read -r -p "Select certificate [0=Back]: " CHOICE
+
+        # -------------------------------------------------
+        # BACK TO MAIN MENU
+        # -------------------------------------------------
+        if [[ "$CHOICE" == "0" ]]; then
+            return
+        fi
+
+        # -------------------------------------------------
+        # INVALID INPUT
+        # -------------------------------------------------
+        if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || \
+           [ "$CHOICE" -lt 1 ] || \
+           [ "$CHOICE" -gt ${#CERTS_LIST[@]} ]; then
+
+            error "Invalid certificate ID."
+            sleep 1
+            continue
+        fi
+
+        # -------------------------------------------------
+        # SELECT CERTIFICATE
+        # -------------------------------------------------
+        SELECTED_INDEX=$((CHOICE - 1))
+
+        IFS='|' read -r d_name d_days d_panel d_file <<< \
+            "${CERTS_LIST[$SELECTED_INDEX]}"
+
+        CERT_DIR=$(dirname "$d_file")
+
+        # -------------------------------------------------
+        # CERTIFICATE DETAILS LOOP
+        # -------------------------------------------------
+        while true; do
+            ui_header
+
+            section_title "CERTIFICATE DETAILS" \
+                "Detailed information for ${d_name}"
+
+            echo -e "  ${GRAY}Domain:${RESET}        ${WHITE}${d_name}${RESET}"
+            echo -e "  ${GRAY}Panel:${RESET}         ${CYAN}${d_panel}${RESET}"
+            echo -e "  ${GRAY}Certificate:${RESET}  ${WHITE}${CERT_DIR}/fullchain.pem${RESET}"
+            echo -e "  ${GRAY}Private key:${RESET}  ${WHITE}${CERT_DIR}/privkey.pem${RESET}"
+            echo -e "  ${GRAY}Days left:${RESET}     ${WHITE}${d_days} days${RESET}"
+            echo -e "  ${GRAY}SSL Grade:${RESET}     $(ssl_grade "$d_days")"
+
+            echo
+
+            # Check actual certificate files
+            if [[ -f "${CERT_DIR}/fullchain.pem" ]]; then
+                echo -e "  ${GREEN}●${RESET} Certificate file: ${GREEN}FOUND${RESET}"
+            else
+                echo -e "  ${RED}●${RESET} Certificate file: ${RED}MISSING${RESET}"
+            fi
+
+            if [[ -f "${CERT_DIR}/privkey.pem" ]]; then
+                echo -e "  ${GREEN}●${RESET} Private key: ${GREEN}FOUND${RESET}"
+            else
+                echo -e "  ${RED}●${RESET} Private key: ${RED}MISSING${RESET}"
+            fi
+
+            echo
+            echo -e "  ${BRIGHT_RED}0)${RESET} ${GRAY}Back to Managed Certificates${RESET}"
+            echo
+
+            read -r -p "Select option [0=Back]: " DETAIL_CHOICE
+
+            if [[ "$DETAIL_CHOICE" == "0" ]]; then
+                break
+            fi
+
+            warning "Invalid option."
+            sleep 1
+        done
+
+        # Continue the Managed Certificates list
+        # instead of returning to the main menu.
+    done
 }
 
 # =========================================================
