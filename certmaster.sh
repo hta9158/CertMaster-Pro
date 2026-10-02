@@ -99,7 +99,7 @@ repeat_char() {
 }
 
 rule() {
-    local color="${1:-$BRIGHT_RED}"
+    local color="${1:-$DARK_GRAY}"
     echo -e "${color}$(repeat_char '─' "$(box_width)")${RESET}"
 }
 
@@ -124,7 +124,7 @@ ui_header() {
     inner=$(box_width)
 
     echo
-    echo -e "${BRIGHT_RED}  ╭$(repeat_char '─' $((inner-2)))╮${RESET}"
+    echo -e "${DARK_GRAY}  ┌$(repeat_char '─' $((inner-2)))┐${RESET}"
     center_text "${BRIGHT_RED}${BOLD}██████╗███████╗██████╗ ████████╗███╗   ███╗ █████╗ ███████╗████████╗███████╗██████╗${RESET}"
     center_text "${BRIGHT_RED}${BOLD}██╔════╝██╔════╝██╔══██╗╚══██╔══╝████╗ ████║██╔══██╗██╔════╝╚══██╔══╝██╔════╝██╔══██╗${RESET}"
     center_text "${BRIGHT_RED}${BOLD}██║     █████╗  ██████╔╝   ██║   ██╔████╔██║███████║███████╗   ██║   █████╗  ██████╔╝${RESET}"
@@ -133,7 +133,7 @@ ui_header() {
     center_text "${BRIGHT_RED}${BOLD} ╚═════╝╚══════╝╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝   ╚═╝   ╚══════╝╚═╝  ╚═╝${RESET}"
     center_text "${CYAN}◆  SSL CERTIFICATE MANAGEMENT  ◆${RESET}"
     center_text "${MAGENTA}Enterprise CLI  ${DARK_GRAY}•${RESET}  ${WHITE}v${VERSION}${RESET}"
-    echo -e "${BRIGHT_RED}  ├$(repeat_char '─' $((inner-2)))┤${RESET}"
+    echo -e "${DARK_GRAY}  ├$(repeat_char '─' $((inner-2)))┤${RESET}"
 
     os_name=$( . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Linux}" )
     if systemctl is-active nginx >/dev/null 2>&1; then web_status="NGINX";
@@ -143,16 +143,15 @@ ui_header() {
     if crontab -l 2>/dev/null | grep -q 'certbot renew'; then renew_status="ENABLED"; else renew_status="OFF"; fi
 
     echo -e "  ${CYAN}SYSTEM${RESET} ${WHITE}${os_name}${RESET}"
-    echo -e "  ${DARK_GRAY}├─${RESET} ${GRAY}WEB${RESET} ${BLUE}${web_status}${RESET}  ${DARK_GRAY}•${RESET}  ${GRAY}CERTIFICATES${RESET} ${WHITE}${cert_count}${RESET}  ${DARK_GRAY}•${RESET}  ${GRAY}AUTO-RENEW${RESET} $([[ "$renew_status" == "ENABLED" ]] && echo -e "${GREEN}ON${RESET}" || echo -e "${YELLOW}OFF${RESET}")  ${DARK_GRAY}•${RESET}  ${GRAY}STATUS${RESET} ${GREEN}● ONLINE${RESET}"
-    echo -e "${BRIGHT_RED}  ╰$(repeat_char '─' $((inner-2)))╯${RESET}"
+    echo -e "  ${DARK_GRAY}·${RESET} ${GRAY}WEB${RESET} ${BLUE}${web_status}${RESET}  ${DARK_GRAY}•${RESET}  ${GRAY}CERTIFICATES${RESET} ${WHITE}${cert_count}${RESET}  ${DARK_GRAY}•${RESET}  ${GRAY}AUTO-RENEW${RESET} $([[ "$renew_status" == "ENABLED" ]] && echo -e "${GREEN}ON${RESET}" || echo -e "${YELLOW}OFF${RESET}")  ${DARK_GRAY}•${RESET}  ${GRAY}STATUS${RESET} ${GREEN}● ONLINE${RESET}"
+    echo -e "${DARK_GRAY}  └$(repeat_char '─' $((inner-2)))┘${RESET}"
     echo
 }
 
 section_title() {
     local title="$1" subtitle="$2"
-    echo -e "${BRIGHT_RED}╭─${RESET} ${WHITE}${BOLD}${title}${RESET} ${BRIGHT_RED}$(repeat_char '─' 3)${RESET}"
-    [[ -n "$subtitle" ]] && echo -e "${GRAY}│  $subtitle${RESET}"
-    echo -e "${BRIGHT_RED}╰$(repeat_char '─' 72)${RESET}"
+    echo -e "${DARK_GRAY}──${RESET} ${WHITE}${BOLD}${title}${RESET} ${DARK_GRAY}──${RESET}"
+    [[ -n "$subtitle" ]] && echo -e "${GRAY}   $subtitle${RESET}"
     echo
 }
 
@@ -165,7 +164,7 @@ log()     { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$1] $2" >> "$LOG_FILE"; }
 pause_screen() {
     echo
     rule "$DARK_GRAY"
-    read -r -p "  ${BRIGHT_RED}↳${RESET} ${GRAY}Press ENTER to return to the main menu...${RESET} "
+    read -r -p "  Press ENTER to return to the main menu... "
 }
 
 progress_bar() {
@@ -186,7 +185,7 @@ progress_bar() {
 
 menu_item() {
     local n="$1" title="$2" desc="$3"
-    printf "  ${BRIGHT_RED}${BOLD}%-3s${RESET} ${WHITE}${BOLD}%-23s${RESET} ${DARK_GRAY}│${RESET} ${CYAN}%s${RESET}\n" "$n)" "$title" "$desc"
+    printf "  ${BRIGHT_RED}${BOLD}%-3s${RESET} ${WHITE}${BOLD}%-23s${RESET} ${DARK_GRAY}·${RESET} ${CYAN}%s${RESET}\n" "$n)" "$title" "$desc"
 }
 
 # =========================================================
@@ -233,19 +232,19 @@ install_certificate() {
     echo -e " ${CYAN}4)${RESET} Marzneshin"
     echo -e " ${CYAN}5)${RESET} Custom Path"
     echo
-    read -p "➜ Enter panel number [1-5]: " panel_choice
+    read -r -p "Select panel [1-5]: " panel_choice
 
     case $panel_choice in
         1) TARGET_BASE_DIR="/var/lib/rebecca/certs"; PANEL_NAME="Rebecca" ;;
         2) TARGET_BASE_DIR="/var/lib/marzban/certs"; PANEL_NAME="Marzban" ;;
         3) TARGET_BASE_DIR="/var/lib/pasarguard/certs"; PANEL_NAME="Pasarguard" ;;
         4) TARGET_BASE_DIR="/var/lib/marzneshin/certs"; PANEL_NAME="Marzneshin" ;;
-        5) read -p "➜ Enter custom absolute path: " TARGET_BASE_DIR; PANEL_NAME="Custom" ;;
+        5) read -r -p "Custom absolute path: " TARGET_BASE_DIR; PANEL_NAME="Custom" ;;
         *) error "Invalid choice."; pause_screen; return ;;
     esac
 
     echo
-    read -p "➜ Enter the domain name (e.g. app.example.com): " DOMAIN
+    read -r -p "Domain name: " DOMAIN
     [[ -z "$DOMAIN" ]] && return
 
     echo
@@ -254,7 +253,7 @@ install_certificate() {
     echo -e " ${CYAN}2)${RESET} Cloudflare DNS (No Downtime)"
     echo -e " ${CYAN}3)${RESET} Standalone (Requires Port 80)"
     echo
-    read -p "➜ Enter method number [1-3]: " challenge_choice
+    read -r -p "Challenge method [1-3]: " challenge_choice
 
     case $challenge_choice in
         1)
@@ -266,8 +265,8 @@ install_certificate() {
             CF_EMAIL=$(jq -r '.cloudflare_email' "$CONFIG_FILE")
             CF_KEY=$(jq -r '.cloudflare_api_key' "$CONFIG_FILE")
             if [[ -z "$CF_EMAIL" || "$CF_EMAIL" == "null" ]]; then
-                read -p "➜ Enter Cloudflare Email: " CF_EMAIL
-                read -p "➜ Enter Cloudflare API Key: " CF_KEY
+                read -r -p "Cloudflare Email: " CF_EMAIL
+                read -r -p "Cloudflare API Key: " CF_KEY
                 TMP=$(jq --arg e "$CF_EMAIL" --arg k "$CF_KEY" '.cloudflare_email=$e | .cloudflare_api_key=$k' "$CONFIG_FILE")
                 echo "$TMP" > "$CONFIG_FILE"
             fi
@@ -279,7 +278,7 @@ install_certificate() {
         3)
             if lsof -Pi :80 -sTCP:LISTEN -t >/dev/null ; then
                 warning "Port 80 is in use!"
-                read -p "➜ Stop webserver temporarily? (y/n): " stop_web
+                read -r -p "Stop webserver temporarily? [y/N]: " stop_web
                 if [[ "$stop_web" =~ ^[Yy]$ ]]; then
                     detect_webserver
                     [[ ! -z "$WEBSERVER" ]] && systemctl stop $WEBSERVER
@@ -326,14 +325,14 @@ install_certificate() {
 wildcard_ssl() {
     ui_header
     echo -e "${NEON_PINK}--- GENERATE WILDCARD SSL ---${RESET}"
-    read -p "➜ Enter base domain (e.g. example.com): " DOMAIN
+    read -r -p "Base domain: " DOMAIN
     [[ -z "$DOMAIN" ]] && return
 
     CF_EMAIL=$(jq -r '.cloudflare_email' "$CONFIG_FILE")
     CF_KEY=$(jq -r '.cloudflare_api_key' "$CONFIG_FILE")
     if [[ -z "$CF_EMAIL" || "$CF_EMAIL" == "null" ]]; then
-        read -p "➜ Enter Cloudflare Email: " CF_EMAIL
-        read -p "➜ Enter Cloudflare API Key: " CF_KEY
+        read -r -p "Cloudflare Email: " CF_EMAIL
+        read -r -p "Cloudflare API Key: " CF_KEY
         TMP=$(jq --arg e "$CF_EMAIL" --arg k "$CF_KEY" '.cloudflare_email=$e | .cloudflare_api_key=$k' "$CONFIG_FILE")
         echo "$TMP" > "$CONFIG_FILE"
     fi
@@ -443,7 +442,7 @@ list_certificates() {
     echo
     echo -e "${GRAY}0) Return to Main Menu${RESET}"
     echo
-    read -p "➜ Select ID for details (or 0 to exit): " CHOICE
+    read -r -p "Select ID [0=Back]: " CHOICE
 
     if [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -gt 0 ] && [ "$CHOICE" -le ${#CERTS_LIST[@]} ]; then
         SELECTED_INDEX=$((CHOICE - 1))
@@ -492,7 +491,7 @@ delete_certificate() {
     echo
     echo -e "${GRAY}0) Cancel and Return${RESET}"
     echo
-    read -p "➜ Enter the ID of the domain to completely wipe: " CHOICE
+    read -r -p "Certificate ID [0=Cancel]: " CHOICE
 
     if [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -gt 0 ] && [ "$CHOICE" -le ${#CERTS_LIST[@]} ]; then
         SELECTED_INDEX=$((CHOICE - 1))
@@ -500,7 +499,7 @@ delete_certificate() {
         
         echo
         warning "You are about to completely wipe: $d_name"
-        read -p "➜ Are you absolutely sure? (Type 'y' to confirm): " confirm
+        read -r -p "Confirm deletion [y/N]: " confirm
         
         if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
             progress_bar 15 "Purging $d_name from server..."
@@ -563,7 +562,7 @@ health_monitor() {
 auto_repair() {
     ui_header
     echo -e "${NEON_PINK}--- SYSTEM AUTO REPAIR ---${RESET}"
-    read -p "➜ Start automated system repair? (y/n): " confirm
+    read -r -p "Start system repair [y/N]: " confirm
     [[ "$confirm" =~ ^[Yy]$ ]] || return
 
     echo
@@ -587,7 +586,7 @@ setup_auto_renew() {
     ui_header
     echo -e "${NEON_PINK}--- SMART AUTO RENEW ---${RESET}"
     echo -e "This will automatically renew certs and sync files to panels."
-    read -p "➜ Enable Auto-Renew? (y/n): " confirm
+    read -r -p "Enable Auto-Renew [y/N]: " confirm
     
     if [[ "$confirm" =~ ^[Yy]$ ]]; then
         CRON_JOB="0 3 * * * certbot renew --quiet --deploy-hook \"/usr/local/bin/certmaster --sync\" >> $LOG_FILE 2>&1"
@@ -644,7 +643,7 @@ dashboard() {
 update_script() {
     ui_header
     echo -e "${NEON_PINK}--- SOFTWARE UPDATE ---${RESET}"
-    read -p "➜ Check and install latest update? (y/n): " confirm
+    read -r -p "Install latest update [y/N]: " confirm
     [[ "$confirm" =~ ^[Yy]$ ]] || return
 
     echo
@@ -689,7 +688,7 @@ main_menu() {
         printf "                              ${GREEN}●${RESET} ${GRAY}Ready${RESET}\n"
         echo -e "  ${DARK_GRAY}────────────────────────────────────────────────────────────────────────────${RESET}"
         echo
-        read -r -p "  ${BRIGHT_RED}${BOLD}❯${RESET} ${WHITE}Select module [0-9]: ${RESET}" OPTION
+        read -r -p "  Select option [0-9]: " OPTION
 
         case $OPTION in
             1) install_certificate ;;
