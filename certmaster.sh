@@ -247,43 +247,6 @@ telegram_alert() {
 }
 
 # =========================================================
-# PER-DOMAIN CERTIFICATE PROGRESS
-# =========================================================
-certificate_progress() {
-    local pid="$1"
-    local domain="$2"
-    local width=34
-    local percent=5
-    local filled empty
-
-    echo -e "  ${MAGENTA}◆${RESET} ${WHITE}Issuing certificate:${RESET} ${CYAN}${domain}${RESET}"
-
-    while kill -0 "$pid" 2>/dev/null; do
-        filled=$((percent * width / 100))
-        empty=$((width - filled))
-
-        printf "\r  ${BRIGHT_RED}["
-        if (( filled > 0 )); then
-            printf '%*s' "$filled" '' | tr ' ' '█'
-        fi
-        if (( empty > 0 )); then
-            printf '%*s' "$empty" '' | tr ' ' '░'
-        fi
-        printf "] ${CYAN}%3d%%${RESET}" "$percent"
-
-        if (( percent < 90 )); then
-            percent=$((percent + 2))
-        fi
-
-        sleep 0.12
-    done
-
-    printf "\r  ${BRIGHT_RED}["
-    printf '%*s' "$width" '' | tr ' ' '█'
-    printf "] ${GREEN}100%%${RESET}\n"
-}
-
-# =========================================================
 # 1. INSTALL SSL
 # =========================================================
 install_certificate() {
@@ -497,113 +460,58 @@ install_certificate() {
 
     for DOMAIN in "${DOMAINS[@]}"; do
         CURRENT_INDEX=$((SUCCESS_COUNT + FAILED_COUNT + 1))
-
         echo
-        echo -e "  ${DARK_GRAY}────────────────────────────────────────────────────────────${RESET}"
-        echo -e "  ${BRIGHT_RED}[${CURRENT_INDEX}/${#DOMAINS[@]}]${RESET} ${WHITE}${BOLD}${DOMAIN}${RESET}"
-        echo -e "  ${GRAY}Issuing independent SSL certificate...${RESET}"
+        echo -e "${WHITE}${BOLD}[${CURRENT_INDEX}/${#DOMAINS[@]}] ${DOMAIN}${RESET}"
 
-        CERTBOT_STATUS=1
-
-        case "$challenge_choice" in
+        case $challenge_choice in
             2)
                 certbot certonly \
                     --dns-cloudflare \
                     --dns-cloudflare-credentials /root/.secrets/cloudflare.ini \
                     -d "$DOMAIN" \
                     --non-interactive --agree-tos \
-                    --register-unsafely-without-email \
-                    >/tmp/certmaster-certbot.log 2>&1 &
+                    --register-unsafely-without-email >/dev/null 2>&1
                 ;;
-
             3)
                 certbot certonly \
                     --webroot -w "$WEBROOT_PATH" \
                     -d "$DOMAIN" \
                     --non-interactive --agree-tos \
-                    --register-unsafely-without-email \
-                    >/tmp/certmaster-certbot.log 2>&1 &
+                    --register-unsafely-without-email >/dev/null 2>&1
                 ;;
-
             4)
                 certbot certonly \
                     --standalone \
                     -d "$DOMAIN" \
                     --non-interactive --agree-tos \
-                    --register-unsafely-without-email \
-                    >/tmp/certmaster-certbot.log 2>&1 &
-                ;;
-
-            *)
-                CERTBOT_STATUS=1
+                    --register-unsafely-without-email >/dev/null 2>&1
                 ;;
         esac
 
-        if [[ "$challenge_choice" =~ ^[234]$ ]]; then
-            CERTBOT_PID=$!
-            certificate_progress "$CERTBOT_PID" "$DOMAIN"
-            wait "$CERTBOT_PID"
-            CERTBOT_STATUS=$?
-        fi
+        CERTBOT_STATUS=$?
 
-        if [[ $CERTBOT_STATUS -eq 0 && \
-              -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" && \
-              -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]]; then
-
+        if [[ $CERTBOT_STATUS -eq 0 && -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" && -f "/etc/letsencrypt/live/$DOMAIN/privkey.pem" ]]; then
             FINAL_PATH="$TARGET_BASE_DIR/$DOMAIN"
             mkdir -p "$FINAL_PATH"
-
-            cp \
-                "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" \
-                "$FINAL_PATH/fullchain.pem"
-
-            cp \
-                "/etc/letsencrypt/live/$DOMAIN/privkey.pem" \
-                "$FINAL_PATH/privkey.pem"
-
+            cp "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" "$FINAL_PATH/fullchain.pem"
+            cp "/etc/letsencrypt/live/$DOMAIN/privkey.pem" "$FINAL_PATH/privkey.pem"
             chmod 644 "$FINAL_PATH/fullchain.pem"
             chmod 600 "$FINAL_PATH/privkey.pem"
 
-            TMP=$(jq \
-                --arg d "$DOMAIN" \
-                --arg p "$FINAL_PATH" \
-                --arg pn "$PANEL_NAME" \
+            TMP=$(jq --arg d "$DOMAIN" --arg p "$FINAL_PATH" --arg pn "$PANEL_NAME" \
                 '.domains = (.domains // []) + [{"main_domain":$d,"install_path":$p,"panel":$pn}]' \
                 "$CONFIG_FILE" 2>/dev/null)
-
-            if [[ -n "$TMP" && "$TMP" != "null" ]]; then
-                echo "$TMP" > "$CONFIG_FILE"
-                chmod 600 "$CONFIG_FILE"
-            fi
+            [[ -n "$TMP" ]] && echo "$TMP" > "$CONFIG_FILE"
 
             ((SUCCESS_COUNT++))
             RESULTS+=("OK|$DOMAIN|$FINAL_PATH")
-
-            echo
             success "SSL installed: $DOMAIN"
-            echo -e "  ${GRAY}Certificate:${RESET} ${WHITE}$FINAL_PATH/fullchain.pem${RESET}"
-            echo -e "  ${GRAY}Private key:${RESET} ${WHITE}$FINAL_PATH/privkey.pem${RESET}"
-
-            log "SUCCESS" "Installed SSL for $DOMAIN | Panel: $PANEL_NAME"
-
-            telegram_alert "✅ SSL Installed
-Domain: $DOMAIN
-Panel: $PANEL_NAME
-Path: $FINAL_PATH"
-
         else
             ((FAILED_COUNT++))
             RESULTS+=("FAIL|$DOMAIN|")
-
-            echo
             error "SSL failed: $DOMAIN"
-            echo -e "  ${GRAY}Certbot log:${RESET} ${WHITE}/tmp/certmaster-certbot.log${RESET}"
-
-            log "ERROR" "SSL failed for $DOMAIN | Panel: $PANEL_NAME"
         fi
-
-        echo -e "  ${DARK_GRAY}────────────────────────────────────────────────────────────${RESET}"
-done
+    done
 
     if [[ -n "$STOPPED_WEBSERVER" ]]; then
         systemctl start "$STOPPED_WEBSERVER"
@@ -737,50 +645,97 @@ get_scanned_domains() {
 # 3. LIST CERTIFICATES
 # =========================================================
 list_certificates() {
-    ui_header
-    echo -e "${NEON_PINK}--- MANAGED CERTIFICATES ---${RESET}"
-    echo
-    
-    get_scanned_domains
+    while true; do
+        ui_header
+        echo -e "${NEON_PINK}--- MANAGED CERTIFICATES ---${RESET}"
+        echo
 
-    if [ ${#CERTS_LIST[@]} -eq 0 ]; then
-        warning "No valid SSL certificates found on the server."
-        pause_screen
-        return
-    fi
+        get_scanned_domains
 
-    printf "${CYAN}%-4s %-65s %-15s %-10s %-8s${RESET}\n" "ID" "DOMAIN" "PANEL" "DAYS LEFT" "GRADE"
-    echo -e "${GRAY}-------------------------------------------------------------------------------------------------------------${RESET}"
+        if [ ${#CERTS_LIST[@]} -eq 0 ]; then
+            warning "No valid SSL certificates found on the server."
+            echo
+            echo -e "${BRIGHT_RED}0)${RESET} Return to Main Menu"
+            echo
+            read -r -p "Select option [0=Back]: " EMPTY_CHOICE
+            return
+        fi
 
-    INDEX=1
-    for item in "${CERTS_LIST[@]}"; do
-        IFS='|' read -r d_name d_days d_panel d_file <<< "$item"
-        GRADE=$(ssl_grade "$d_days")
-        printf "%-4s %-65s %-15s %-10s %-8b\n" "[$INDEX]" "$d_name" "$d_panel" "$d_days" "$GRADE"
-        ((INDEX++))
-    done
+        printf "${CYAN}%-4s %-65s %-15s %-10s %-8s${RESET}\n" "ID" "DOMAIN" "PANEL" "DAYS LEFT" "GRADE"
+        echo -e "${GRAY}-------------------------------------------------------------------------------------------------------------${RESET}"
 
-    echo
-    echo -e "${GRAY}0) Return to Main Menu${RESET}"
-    echo
-    read -r -p "Select ID [0=Back]: " CHOICE
+        INDEX=1
+        for item in "${CERTS_LIST[@]}"; do
+            IFS='|' read -r d_name d_days d_panel d_file <<< "$item"
+            GRADE=$(ssl_grade "$d_days")
+            printf "%-4s %-65s %-15s %-10s %-8b\n" "[$INDEX]" "$d_name" "$d_panel" "$d_days" "$GRADE"
+            ((INDEX++))
+        done
 
-    if [[ "$CHOICE" =~ ^[0-9]+$ ]] && [ "$CHOICE" -gt 0 ] && [ "$CHOICE" -le ${#CERTS_LIST[@]} ]; then
+        echo
+        echo -e "${BRIGHT_RED}0)${RESET} Return to Main Menu"
+        echo
+        read -r -p "Select ID [0=Back]: " CHOICE
+
+        # 0 from the certificate list -> main menu
+        if [[ "$CHOICE" == "0" ]]; then
+            return
+        fi
+
+        # Invalid certificate selection -> stay in Managed Certificates
+        if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || \
+           [ "$CHOICE" -lt 1 ] || \
+           [ "$CHOICE" -gt ${#CERTS_LIST[@]} ]; then
+            error "Invalid certificate ID."
+            sleep 1
+            continue
+        fi
+
         SELECTED_INDEX=$((CHOICE - 1))
         IFS='|' read -r d_name d_days d_panel d_file <<< "${CERTS_LIST[$SELECTED_INDEX]}"
-        
         CERT_DIR=$(dirname "$d_file")
-        
-        ui_header
-        echo -e "${NEON_PINK}--- CERTIFICATE DETAILS ---${RESET}"
-        echo -e "${CYAN}🌐 Domain:${RESET}       $d_name"
-        echo -e "${CYAN}📦 Active Panel:${RESET} $d_panel"
-        echo -e "${CYAN}📂 Cert File:${RESET}    $CERT_DIR/fullchain.pem"
-        echo -e "${CYAN}🔑 Private Key:${RESET}  $CERT_DIR/privkey.pem"
-        echo -e "${CYAN}⏳ Days Left:${RESET}    $d_days days"
-        echo -e "${CYAN}🏆 SSL Grade:${RESET}    $(ssl_grade "$d_days")"
-    fi
-    pause_screen
+
+        # =====================================================
+        # CERTIFICATE DETAILS
+        # =====================================================
+        while true; do
+            ui_header
+            echo -e "${NEON_PINK}--- CERTIFICATE DETAILS ---${RESET}"
+            echo
+            echo -e "${CYAN}🌐 Domain:${RESET}       $d_name"
+            echo -e "${CYAN}📦 Active Panel:${RESET} $d_panel"
+            echo -e "${CYAN}📂 Cert File:${RESET}    $CERT_DIR/fullchain.pem"
+            echo -e "${CYAN}🔑 Private Key:${RESET}  $CERT_DIR/privkey.pem"
+            echo -e "${CYAN}⏳ Days Left:${RESET}    $d_days days"
+            echo -e "${CYAN}🏆 SSL Grade:${RESET}    $(ssl_grade "$d_days")"
+
+            echo
+            if [[ -f "$CERT_DIR/fullchain.pem" ]]; then
+                echo -e "${GREEN}●${RESET} Certificate: ${GREEN}FOUND${RESET}"
+            else
+                echo -e "${RED}●${RESET} Certificate: ${RED}MISSING${RESET}"
+            fi
+
+            if [[ -f "$CERT_DIR/privkey.pem" ]]; then
+                echo -e "${GREEN}●${RESET} Private Key:  ${GREEN}FOUND${RESET}"
+            else
+                echo -e "${RED}●${RESET} Private Key:  ${RED}MISSING${RESET}"
+            fi
+
+            echo
+            echo -e "${BRIGHT_RED}0)${RESET} Back to Managed Certificates"
+            echo
+            read -r -p "Select option [0=Back]: " DETAIL_CHOICE
+
+            if [[ "$DETAIL_CHOICE" == "0" ]]; then
+                # IMPORTANT: go back to certificate list, NOT main menu
+                break
+            fi
+
+            error "Invalid option. Select 0 to return to Managed Certificates."
+            sleep 1
+        done
+    done
 }
 
 # =========================================================
