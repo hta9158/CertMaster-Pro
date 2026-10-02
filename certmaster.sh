@@ -1451,48 +1451,195 @@ sync_certificates() {
     (( failed == 0 ))
 }
 
+scan_auto_renew_domains() {
+    ui_header
+    echo -e "${NEON_PINK}--- AUTO SCAN SSL DOMAINS ---${RESET}"
+    echo
+
+    if ! command -v certbot >/dev/null 2>&1; then
+        error "Certbot is not installed."
+        pause_screen
+        return
+    fi
+
+    declare -A FOUND_PATH
+    declare -A FOUND_PANEL
+
+    # 1) Existing CertMaster configuration
+    while IFS= read -r item; do
+        [[ -z "$item" ]] && continue
+        d=$(jq -r '.main_domain // empty' <<< "$item")
+        p=$(jq -r '.install_path // empty' <<< "$item")
+        pn=$(jq -r '.panel // "Custom"' <<< "$item")
+        [[ -n "$d" && -n "$p" ]] || continue
+        [[ -n "${FOUND_PATH[$d]:-}" ]] || FOUND_PATH["$d"]="$p"
+        FOUND_PANEL["$d"]="$pn"
+    done < <(jq -c '.domains[]? // empty' "$CONFIG_FILE" 2>/dev/null)
+
+    # 2) Let's Encrypt live certificates
+    if [[ -d /etc/letsencrypt/live ]]; then
+        while IFS= read -r cert_dir; do
+            [[ -f "$cert_dir/fullchain.pem" && -f "$cert_dir/privkey.pem" ]] || continue
+            d=$(basename "$cert_dir")
+            [[ -n "${FOUND_PATH[$d]:-}" ]] || FOUND_PATH["$d"]="$cert_dir"
+            [[ -n "${FOUND_PANEL[$d]:-}" ]] || FOUND_PANEL["$d"]="Custom"
+        done < <(find /etc/letsencrypt/live -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
+    fi
+
+    if [[ ${#FOUND_PATH[@]} -eq 0 ]]; then
+        warning "No SSL domains were found."
+        echo
+        echo "Install an SSL certificate first, then run this scan again."
+        pause_screen
+        return
+    fi
+
+    local domains=()
+    while IFS= read -r d; do
+        [[ -n "$d" ]] && domains+=("$d")
+    done < <(printf '%s\n' "${!FOUND_PATH[@]}" | sort)
+
+    echo -e "${NEON_CYAN}Found ${#domains[@]} SSL domain(s):${RESET}"
+    echo
+
+    local i=1 d path panel state
+    for d in "${domains[@]}"; do
+        path="${FOUND_PATH[$d]}"
+        panel="${FOUND_PANEL[$d]:-Custom}"
+        state=$(jq -r --arg d "$d" '.domains[]? | select(.main_domain==$d) | (.auto_renew // false)' "$CONFIG_FILE" 2>/dev/null | head -n1)
+        [[ "$state" == "true" ]] && state="ENABLED" || state="OFF"
+
+        if [[ -f "/etc/letsencrypt/live/$d/fullchain.pem" && -f "/etc/letsencrypt/live/$d/privkey.pem" ]]; then
+            success "[$i] $d"
+            echo "    Panel:        $panel"
+            echo "    Exact Path:   $path"
+            echo "    Auto-Renew:   $state"
+        else
+            warning "[$i] $d"
+            echo "    Exact Path:   $path"
+            echo "    Auto-Renew:   $state"
+        fi
+        echo
+        ((i++))
+    done
+
+    echo "  A) Enable Auto-Renew for ALL found domains"
+    echo "  0) Back"
+    echo
+    read -r -p "Select domains (e.g. 1 3), A for ALL, or 0 to cancel: " selection
+
+    [[ "$selection" == "0" ]] && return
+
+    local selected=()
+    if [[ "$selection" =~ ^[Aa]$ ]]; then
+        selected=("${domains[@]}")
+    else
+        for n in $selection; do
+            [[ "$n" =~ ^[0-9]+$ ]] || continue
+            (( n >= 1 && n <= ${#domains[@]} )) || continue
+            selected+=("${domains[$((n-1))]}")
+        done
+    fi
+
+    if [[ ${#selected[@]} -eq 0 ]]; then
+        error "No valid domain selected."
+        pause_screen
+        return
+    fi
+
+    local d_json d_path d_panel tmp
+    for d in "${selected[@]}"; do
+        d_path="${FOUND_PATH[$d]}"
+        d_panel="${FOUND_PANEL[$d]:-Custom}"
+
+        if jq -e --arg d "$d" '.domains[]? | select(.main_domain==$d)' "$CONFIG_FILE" >/dev/null 2>&1; then
+            tmp=$(jq --arg d "$d" --arg p "$d_path" --arg pn "$d_panel" '
+                .domains = ((.domains // []) |
+                    map(if .main_domain == $d
+                        then .install_path=$p | .panel=$pn | .auto_renew=true
+                        else .
+                        end))
+            ' "$CONFIG_FILE")
+        else
+            tmp=$(jq --arg d "$d" --arg p "$d_path" --arg pn "$d_panel" '
+                .domains = ((.domains // []) + [{
+                    "main_domain":$d,
+                    "install_path":$p,
+                    "panel":$pn,
+                    "auto_renew":true
+                }])
+            ' "$CONFIG_FILE")
+        fi
+
+        if [[ -n "$tmp" ]]; then
+            echo "$tmp" > "$CONFIG_FILE"
+            chmod 600 "$CONFIG_FILE"
+            success "$d -> Auto-Renew ENABLED"
+            echo "    Locked path: $d_path"
+            log "AUTO-RENEW" "Enabled $d with exact path $d_path"
+        else
+            error "Failed to configure $d"
+        fi
+    done
+
+    echo
+    success "Selected domain(s) are now configured for Auto-Renew."
+    pause_screen
+}
+
 setup_auto_renew() {
     while true; do
         ui_header
         echo -e "${NEON_PINK}--- SMART AUTO RENEW ---${RESET}"
         echo
 
-        COUNT=$(auto_renew_domain_count)
-        echo -e "${CYAN}Configured domains:${RESET} $COUNT"
-        if auto_renew_scheduler_enabled; then
-            echo -e "${CYAN}Global scheduler:${RESET}  ${GREEN}ACTIVE${RESET} (03:00 daily)"
+        COUNT=$(jq '[.domains[]? | select((.auto_renew // false) == true)] | length' "$CONFIG_FILE" 2>/dev/null || echo 0)
+        if [[ -f /etc/cron.d/certmaster-auto-renew ]]; then
+            SCHEDULER_STATE="ENABLED"
         else
-            echo -e "${CYAN}Global scheduler:${RESET}  ${RED}DISABLED${RESET}"
+            SCHEDULER_STATE="DISABLED"
         fi
-        echo
 
-        menu_item "1" "Add Domain" "Enable Auto-Renew and lock exact path"
-        menu_item "2" "Managed Domains" "View domains and exact destination paths"
-        menu_item "3" "Remove Domain" "Disable Auto-Renew for one domain"
-        menu_item "4" "Renewal Test" "Run Certbot dry-run without changing live files"
-        menu_item "5" "Enable Scheduler" "Run automatic renewal daily at 03:00"
-        menu_item "6" "Disable Scheduler" "Stop the global Auto-Renew scheduler"
-        menu_item "0" "Back" "Return to main menu"
+        echo "Configured domains: $COUNT"
+        echo "Global scheduler:  $SCHEDULER_STATE"
         echo
+        echo "  1) Add Domain              · Scan automatically OR enter manually"
+        echo "  2) Managed Domains         · View domains and exact destination paths"
+        echo "  3) Remove Domain           · Disable Auto-Renew for one domain"
+        echo "  4) Renewal Test            · Run Certbot dry-run without changing live files"
+        echo "  5) Enable Scheduler        · Run automatic renewal daily at 03:00"
+        echo "  6) Disable Scheduler       · Stop the global Auto-Renew scheduler"
+        echo "  0) Back                    · Return to main menu"
+        echo
+        read -r -p "Select option [0-6]: " choice
 
-        read -r -p "Select option [0-6]: " AUTO_CHOICE
-        case "$AUTO_CHOICE" in
-            1) add_auto_renew_domain ;;
+        case "$choice" in
+            1)
+                ui_header
+                echo -e "${NEON_PINK}--- ADD AUTO-RENEW DOMAIN ---${RESET}"
+                echo
+                echo "  1) Scan Automatically"
+                echo "  2) Add Domain Manually"
+                echo "  0) Back"
+                echo
+                read -r -p "Select option [0-2]: " add_choice
+                case "$add_choice" in
+                    1) scan_auto_renew_domains ;;
+                    2) add_auto_renew_domain ;;
+                    0) ;;
+                    *) warning "Invalid option."; pause_screen ;;
+                esac
+                ;;
             2) list_auto_renew_domains ;;
             3) remove_auto_renew_domain ;;
             4) run_auto_renew_test ;;
             5) enable_auto_renew ;;
             6) disable_auto_renew ;;
             0) return ;;
-            *) error "Invalid option."; sleep 1 ;;
+            *) warning "Invalid option."; pause_screen ;;
         esac
     done
 }
-
-if [[ "$1" == "--sync-renewed" ]]; then
-    sync_renewed_certificates
-    exit $?
-fi
 
 if [[ "$1" == "--sync" ]]; then
     sync_certificates
