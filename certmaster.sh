@@ -557,36 +557,238 @@ install_certificate() {
 }
 
 # =========================================================
-# 2. WILDCARD SSL
+# WILDCARD SSL
 # =========================================================
-wildcard_ssl() {
+install_wildcard_ssl() {
     ui_header
-    echo -e "${NEON_PINK}--- GENERATE WILDCARD SSL ---${RESET}"
-    read -r -p "Base domain: " DOMAIN
-    [[ -z "$DOMAIN" ]] && return
+    section_title "WILDCARD SSL" "Choose the target panel, then install a wildcard certificate."
 
-    CF_EMAIL=$(jq -r '.cloudflare_email' "$CONFIG_FILE")
-    CF_KEY=$(jq -r '.cloudflare_api_key' "$CONFIG_FILE")
-    if [[ -z "$CF_EMAIL" || "$CF_EMAIL" == "null" ]]; then
-        read -r -p "Cloudflare Email: " CF_EMAIL
-        read -r -p "Cloudflare API Key: " CF_KEY
-        TMP=$(jq --arg e "$CF_EMAIL" --arg k "$CF_KEY" '.cloudflare_email=$e | .cloudflare_api_key=$k' "$CONFIG_FILE")
-        echo "$TMP" > "$CONFIG_FILE"
-    fi
-    mkdir -p ~/.secrets
-    echo -e "dns_cloudflare_email = $CF_EMAIL\ndns_cloudflare_api_key = $CF_KEY" > ~/.secrets/cloudflare.ini
-    chmod 600 ~/.secrets/cloudflare.ini
+    echo -e "  ${CYAN}1)${RESET} ${WHITE}${BOLD}Pasarguard${RESET}  ${GRAY}/var/lib/pasarguard/certs${RESET}"
+    echo -e "  ${CYAN}2)${RESET} ${WHITE}${BOLD}Marzban${RESET}     ${GRAY}/var/lib/marzban/certs${RESET}"
+    echo -e "  ${CYAN}3)${RESET} ${WHITE}${BOLD}Rebecca${RESET}     ${GRAY}/var/lib/rebecca/certs${RESET}"
+    echo -e "  ${CYAN}4)${RESET} ${WHITE}${BOLD}Custom${RESET}      ${GRAY}Custom certificate directory${RESET}"
+    echo
+    echo -e "  ${BRIGHT_RED}0)${RESET} ${GRAY}Back to main menu${RESET}"
+    echo
+
+    read -r -p "Select panel [0-4]: " panel_choice
+
+    case "$panel_choice" in
+        0)
+            return
+            ;;
+
+        1)
+            TARGET_BASE_DIR="/var/lib/pasarguard/certs"
+            PANEL_NAME="Pasarguard"
+            ;;
+
+        2)
+            TARGET_BASE_DIR="/var/lib/marzban/certs"
+            PANEL_NAME="Marzban"
+            ;;
+
+        3)
+            TARGET_BASE_DIR="/var/lib/rebecca/certs"
+            PANEL_NAME="Rebecca"
+            ;;
+
+        4)
+            read -r -p "Custom certificate directory: " TARGET_BASE_DIR
+
+            if [[ -z "$TARGET_BASE_DIR" || "$TARGET_BASE_DIR" != /* ]]; then
+                error "Custom path must be an absolute path."
+                pause_screen
+                return
+            fi
+
+            PANEL_NAME="Custom"
+            ;;
+
+        *)
+            error "Invalid panel choice."
+            pause_screen
+            return
+            ;;
+    esac
 
     echo
-    progress_bar 25 "Requesting Wildcard Certificate..."
-    certbot certonly --dns-cloudflare --dns-cloudflare-credentials ~/.secrets/cloudflare.ini -d "*.$DOMAIN" -d "$DOMAIN" --non-interactive --agree-tos --register-unsafely-without-email >/dev/null 2>&1
-    
-    if [ $? -eq 0 ]; then
-        success "Wildcard SSL generated successfully for *.$DOMAIN!"
-    else
-        error "Failed to generate Wildcard SSL."
+    success "Selected panel: ${PANEL_NAME}"
+    info "Certificate base path: ${TARGET_BASE_DIR}"
+    echo
+
+    # -----------------------------------------------------
+    # WILDCARD DOMAIN
+    # -----------------------------------------------------
+    echo -e "${WHITE}${BOLD}WILDCARD DOMAIN${RESET}"
+    echo -e "  ${GRAY}Enter the base domain without *.${RESET}"
+    echo -e "  ${GRAY}Example: example.com${RESET}"
+    echo
+
+    read -r -p "Domain: " WILDCARD_DOMAIN
+
+    WILDCARD_DOMAIN="${WILDCARD_DOMAIN#https://}"
+    WILDCARD_DOMAIN="${WILDCARD_DOMAIN#http://}"
+    WILDCARD_DOMAIN="${WILDCARD_DOMAIN#*.}"
+    WILDCARD_DOMAIN="${WILDCARD_DOMAIN%%/*}"
+    WILDCARD_DOMAIN="${WILDCARD_DOMAIN,,}"
+
+    if [[ -z "$WILDCARD_DOMAIN" ]]; then
+        error "No domain entered."
+        pause_screen
+        return
     fi
-    pause_screen
+
+    if [[ ! "$WILDCARD_DOMAIN" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]]; then
+        error "Invalid domain: $WILDCARD_DOMAIN"
+        pause_screen
+        return
+    fi
+
+    CERT_DOMAIN="*.${WILDCARD_DOMAIN}"
+    CERT_DIR="${TARGET_BASE_DIR}/${WILDCARD_DOMAIN}"
+    CERT_FILE="${CERT_DIR}/fullchain.pem"
+    KEY_FILE="${CERT_DIR}/privkey.pem"
+
+    echo
+    echo -e "${WHITE}${BOLD}CERTIFICATE${RESET}"
+    echo -e "  ${GREEN}●${RESET} Wildcard: ${WHITE}${CERT_DOMAIN}${RESET}"
+    echo -e "  ${GREEN}●${RESET} Base domain: ${WHITE}${WILDCARD_DOMAIN}${RESET}"
+    echo
+
+    # -----------------------------------------------------
+    # SUMMARY BEFORE INSTALL
+    # -----------------------------------------------------
+    echo -e "${WHITE}${BOLD}INSTALLATION TARGET${RESET}"
+    echo -e "  ${GRAY}Panel:${RESET}       ${WHITE}${PANEL_NAME}${RESET}"
+    echo -e "  ${GRAY}Base path:${RESET}   ${WHITE}${TARGET_BASE_DIR}${RESET}"
+    echo -e "  ${GRAY}Certificate:${RESET} ${WHITE}${CERT_FILE}${RESET}"
+    echo -e "  ${GRAY}Private key:${RESET} ${WHITE}${KEY_FILE}${RESET}"
+    echo
+
+    # -----------------------------------------------------
+    # CLOUDFLARE DNS
+    # -----------------------------------------------------
+    CF_EMAIL=$(jq -r '.cloudflare_email // empty' "$CONFIG_FILE" 2>/dev/null)
+    CF_KEY=$(jq -r '.cloudflare_api_key // empty' "$CONFIG_FILE" 2>/dev/null)
+
+    if [[ -n "$CF_EMAIL" && -n "$CF_KEY" ]]; then
+        VALIDATION_METHOD="Cloudflare DNS"
+    else
+        VALIDATION_METHOD="DNS Manual"
+    fi
+
+    echo -e "  ${CYAN}◆${RESET} Validation: ${WHITE}${VALIDATION_METHOD}${RESET}"
+    echo
+
+    # -----------------------------------------------------
+    # WILDCARD REQUIRES DNS VALIDATION
+    # -----------------------------------------------------
+    if [[ "$VALIDATION_METHOD" != "Cloudflare DNS" ]]; then
+        warning "Wildcard SSL requires DNS validation."
+        echo
+        echo -e "  ${GRAY}Cloudflare API credentials were not found in CertMaster.${RESET}"
+        echo
+        echo -e "  ${CYAN}1)${RESET} Configure Cloudflare API"
+        echo -e "  ${CYAN}0)${RESET} Back to main menu"
+        echo
+
+        read -r -p "Select option [0-1]: " wildcard_action
+
+        case "$wildcard_action" in
+            1)
+                echo
+                read -r -p "Cloudflare Email: " CF_EMAIL
+                read -r -s -p "Cloudflare API Key: " CF_KEY
+                echo
+
+                if [[ -z "$CF_EMAIL" || -z "$CF_KEY" ]]; then
+                    error "Cloudflare credentials cannot be empty."
+                    pause_screen
+                    return
+                fi
+                ;;
+
+            0|"")
+                return
+                ;;
+
+            *)
+                error "Invalid option."
+                pause_screen
+                return
+                ;;
+        esac
+    fi
+
+    # -----------------------------------------------------
+    # CREATE CERTIFICATE DIRECTORY
+    # -----------------------------------------------------
+    mkdir -p "$CERT_DIR"
+
+    if [[ "$VALIDATION_METHOD" == "Cloudflare DNS" ]]; then
+        echo
+        progress_bar 20 "Requesting wildcard SSL certificate..."
+
+        certbot certonly \
+            --dns-cloudflare \
+            --dns-cloudflare-credentials <(
+                printf '%s\n' \
+                "dns_cloudflare_email = ${CF_EMAIL}" \
+                "dns_cloudflare_api_key = ${CF_KEY}"
+            ) \
+            --preferred-challenges dns-01 \
+            --agree-tos \
+            --non-interactive \
+            --email "$CF_EMAIL" \
+            -d "$WILDCARD_DOMAIN" \
+            -d "$CERT_DOMAIN"
+
+        CERTBOT_STATUS=$?
+    else
+        error "DNS validation is required for wildcard SSL."
+        pause_screen
+        return
+    fi
+
+    # -----------------------------------------------------
+    # INSTALL CERTIFICATE
+    # -----------------------------------------------------
+    if [[ $CERTBOT_STATUS -eq 0 ]]; then
+
+        LIVE_DIR="/etc/letsencrypt/live/${WILDCARD_DOMAIN}"
+
+        if [[ -f "${LIVE_DIR}/fullchain.pem" && -f "${LIVE_DIR}/privkey.pem" ]]; then
+
+            cp -L "${LIVE_DIR}/fullchain.pem" "$CERT_FILE"
+            cp -L "${LIVE_DIR}/privkey.pem" "$KEY_FILE"
+
+            chmod 644 "$CERT_FILE"
+            chmod 600 "$KEY_FILE"
+
+            echo
+            success "Wildcard SSL installed successfully!"
+            echo
+
+            echo -e "${WHITE}${BOLD}SSL INSTALLATION SUMMARY${RESET}"
+            echo -e "  ${GRAY}Panel:${RESET}       ${WHITE}${PANEL_NAME}${RESET}"
+            echo -e "  ${GRAY}Base path:${RESET}   ${WHITE}${TARGET_BASE_DIR}${RESET}"
+            echo -e "  ${GRAY}Domain:${RESET}      ${WHITE}${CERT_DOMAIN}${RESET}"
+            echo -e "  ${GRAY}Certificate:${RESET} ${WHITE}${CERT_FILE}${RESET}"
+            echo -e "  ${GRAY}Private key:${RESET} ${WHITE}${KEY_FILE}${RESET}"
+            echo
+            echo -e "  ${GREEN}●${RESET} Certificate: ${GREEN}SUCCESS${RESET}"
+
+        else
+            error "Certificate files were not found after Certbot completed."
+        fi
+
+    else
+        error "Wildcard SSL installation failed."
+    fi
+
+    echo
+    read -r -p "Press Enter to return to main menu..." _
 }
 
 # =========================================================
