@@ -6,7 +6,7 @@
 #                 (Modern CLI Edition)
 # =========================================================
 
-VERSION="0.0.1 CLI"
+VERSION="1.0.2 CLI"
 
 # =========================================================
 # PATHS
@@ -121,33 +121,52 @@ status_chip() {
 
 ui_header() {
     clear
-    local width inner os_name web_status cert_count renew_status
-    width=$(term_width)
-    inner=$(box_width)
+
+    local os_name web_status cert_count renew_status
+
+    os_name=$( . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Linux}" )
+
+    if systemctl is-active nginx >/dev/null 2>&1; then
+        web_status="NGINX"
+    elif systemctl is-active apache2 >/dev/null 2>&1; then
+        web_status="APACHE"
+    else
+        web_status="NONE"
+    fi
+
+    cert_count=$(find /etc/letsencrypt/live -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
+
+    if crontab -l 2>/dev/null | grep -q 'certbot renew'; then
+        renew_status="ON"
+    else
+        renew_status="OFF"
+    fi
 
     echo
-    echo -e "${DARK_GRAY}  ┌$(repeat_char '─' $((inner-2)))┐${RESET}"
     center_text "${BRIGHT_RED}${BOLD}██████╗███████╗██████╗ ████████╗███╗   ███╗ █████╗ ███████╗████████╗███████╗██████╗${RESET}"
     center_text "${BRIGHT_RED}${BOLD}██╔════╝██╔════╝██╔══██╗╚══██╔══╝████╗ ████║██╔══██╗██╔════╝╚══██╔══╝██╔════╝██╔══██╗${RESET}"
     center_text "${BRIGHT_RED}${BOLD}██║     █████╗  ██████╔╝   ██║   ██╔████╔██║███████║███████╗   ██║   █████╗  ██████╔╝${RESET}"
     center_text "${BRIGHT_RED}${BOLD}██║     ██╔══╝  ██╔══██╗   ██║   ██║╚██╔╝██║██╔══██║╚════██║   ██║   ██╔══╝  ██╔══██╗${RESET}"
     center_text "${BRIGHT_RED}${BOLD}╚██████╗███████╗██║  ██║   ██║   ██║ ╚═╝ ██║██║  ██║███████║   ██║   ███████╗██║  ██║${RESET}"
     center_text "${BRIGHT_RED}${BOLD} ╚═════╝╚══════╝╚═╝  ╚═╝   ╚═╝   ╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝   ╚═╝   ╚══════╝╚═╝  ╚═╝${RESET}"
+
     center_text "${CYAN}◆  SSL CERTIFICATE MANAGEMENT  ◆${RESET}"
-    center_text "${MAGENTA}Enterprise CLI  ${DARK_GRAY}•${RESET}  ${WHITE}v${VERSION}${RESET}"
-    echo -e "${DARK_GRAY}  ├$(repeat_char '─' $((inner-2)))┤${RESET}"
+    center_text "${MAGENTA}Enterprise CLI${RESET}  ${DARK_GRAY}•${RESET}  ${WHITE}v${VERSION}${RESET}"
 
-    os_name=$( . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Linux}" )
-    if systemctl is-active nginx >/dev/null 2>&1; then web_status="NGINX";
-    elif systemctl is-active apache2 >/dev/null 2>&1; then web_status="APACHE";
-    else web_status="NONE"; fi
-    cert_count=$(find /etc/letsencrypt/live -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l)
-    if crontab -l 2>/dev/null | grep -q 'certbot renew'; then renew_status="ENABLED"; else renew_status="OFF"; fi
+    echo
+    printf "  ${GRAY}Telegram:${RESET} ${MAGENTA}${TELEGRAM_HANDLE}${RESET}  ${DARK_GRAY}|${RESET}  ${GRAY}GitHub:${RESET} ${CYAN}${GITHUB_URL}${RESET}\n"
+    printf "  ${GRAY}OS:${RESET} ${WHITE}${os_name}${RESET}  ${DARK_GRAY}|${RESET}  ${GRAY}WEB:${RESET} ${BLUE}${web_status}${RESET}  ${DARK_GRAY}|${RESET}  ${GRAY}CERTS:${RESET} ${WHITE}${cert_count}${RESET}  ${DARK_GRAY}|${RESET}  ${GRAY}AUTO-RENEW:${RESET} "
 
-    echo -e "  ${CYAN}SYSTEM${RESET} ${WHITE}${os_name}${RESET}"
-    echo -e "  ${DARK_GRAY}·${RESET} ${GRAY}WEB${RESET} ${BLUE}${web_status}${RESET}  ${DARK_GRAY}•${RESET}  ${GRAY}CERTIFICATES${RESET} ${WHITE}${cert_count}${RESET}  ${DARK_GRAY}•${RESET}  ${GRAY}AUTO-RENEW${RESET} $([[ "$renew_status" == "ENABLED" ]] && echo -e "${GREEN}ON${RESET}" || echo -e "${YELLOW}OFF${RESET}")  ${DARK_GRAY}•${RESET}  ${GRAY}STATUS${RESET} ${GREEN}● ONLINE${RESET}"
-    echo -e "${DARK_GRAY}  └$(repeat_char '─' $((inner-2)))┘${RESET}"
-    echo -e "  ${GRAY}Telegram${RESET} ${MAGENTA}${TELEGRAM_HANDLE}${RESET}  ${DARK_GRAY}•${RESET}  ${GRAY}GitHub${RESET} ${CYAN}${GITHUB_URL}${RESET}"
+    if [[ "$renew_status" == "ON" ]]; then
+        printf "${GREEN}ON${RESET}"
+    else
+        printf "${YELLOW}OFF${RESET}"
+    fi
+
+    printf "  ${DARK_GRAY}|${RESET}  ${GRAY}STATUS:${RESET} ${GREEN}● ONLINE${RESET}\n"
+
+    # One subtle separator only — intentionally no boxes or extra horizontal lines.
+    echo -e "${DARK_GRAY}$(repeat_char '─' 78)${RESET}"
     echo
 }
 
@@ -673,26 +692,25 @@ update_script() {
 main_menu() {
     while true; do
         ui_header
-        section_title "MAIN CONTROL" "Choose a module to manage your SSL infrastructure"
 
-        menu_item "1"  "Install SSL"          "Issue & install a certificate"
-        menu_item "2"  "Wildcard SSL"         "Generate wildcard certificates"
-        menu_item "3"  "Manage Certificates"  "Inspect, list & manage SSL"
-        menu_item "4"  "Delete / Wipe SSL"    "Remove certificate data"
-        menu_item "5"  "Health Check"         "Diagnose server & SSL health"
-        menu_item "6"  "Auto Repair"          "Repair SSL & system services"
-        menu_item "7"  "Auto Renew"           "Configure automatic renewal"
-        menu_item "8"  "Live Dashboard"       "View live CertMaster status"
-        menu_item "9"  "Update"               "Update from GitHub"
+        echo -e "  ${GRAY}MAIN MENU${RESET}"
+        echo -e "  ${DARK_GRAY}Choose a module to manage your SSL infrastructure${RESET}"
+        echo
+
+        menu_item "1"  "Install SSL"           "Issue & install a certificate"
+        menu_item "2"  "Wildcard SSL"          "Generate wildcard certificates"
+        menu_item "3"  "Manage Certificates"   "Inspect, list & manage SSL"
+        menu_item "4"  "Delete / Wipe SSL"     "Remove certificate data"
+        menu_item "5"  "Health Check"          "Diagnose server & SSL health"
+        menu_item "6"  "Auto Repair"           "Repair SSL & system services"
+        menu_item "7"  "Auto Renew"            "Configure automatic renewal"
+        menu_item "8"  "Live Dashboard"        "View live CertMaster status"
+        menu_item "9"  "Update"                "Update from GitHub"
 
         echo
-        echo -e "  ${DARK_GRAY}────────────────────────────────────────────────────────────────────────────${RESET}"
-        printf "  ${GRAY}Telegram:${RESET} ${MAGENTA}${TELEGRAM_HANDLE}${RESET}  ${DARK_GRAY}•${RESET}  ${GRAY}GitHub:${RESET} ${CYAN}${GITHUB_URL}${RESET}\n"
-        printf "  ${BRIGHT_RED}0)${RESET} ${WHITE}${BOLD}Exit${RESET}  ${GRAY}Close CertMaster safely${RESET}"
-        printf "                              ${GREEN}●${RESET} ${GRAY}Ready${RESET}\n"
-        echo -e "  ${DARK_GRAY}────────────────────────────────────────────────────────────────────────────${RESET}"
+        printf "  ${BRIGHT_RED}0)${RESET} ${WHITE}Exit${RESET}  ${GRAY}Close CertMaster safely${RESET}\n"
         echo
-        read -r -p "  Select option [0-9]: " OPTION
+        read -r -p "Select option [0-9]: " OPTION
 
         case $OPTION in
             1) install_certificate ;;
